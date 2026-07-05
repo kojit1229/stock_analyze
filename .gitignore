@@ -1,0 +1,16 @@
+# データ（DB / 取得PDF）
+/data/
+*.db
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# エディタ / OS
+.DS_Store
+.idea/
+.vscode/
