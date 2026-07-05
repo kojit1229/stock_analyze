@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>決算ナビ | 決算日程・決算短信管理</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">📈</span>
+      <span class="brand-name">決算ナビ</span>
+    </div>
+    <nav class="mainnav" id="mainnav">
+      <a href="#/home" data-route="home">ホーム</a>
+      <a href="#/schedule" data-route="schedule">決算予定</a>
+      <a href="#/mystocks" data-route="mystocks">マイ銘柄</a>
+      <a href="#/disclosures" data-route="disclosures">決算短信</a>
+    </nav>
+    <button class="fetch-btn" id="globalFetch" title="登録銘柄の決算短信を取得">⟳ 取得</button>
+  </header>
+
+  <main id="app" class="app"></main>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
