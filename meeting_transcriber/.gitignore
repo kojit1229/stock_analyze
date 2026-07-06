@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+logs/
+models/
+poc_out/
+config.json

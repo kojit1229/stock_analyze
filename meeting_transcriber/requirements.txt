@@ -1,0 +1,19 @@
+# オンライン会議リアルタイム文字起こしツール 依存ライブラリ
+# Windows 10/11 + Python 3.11+ 想定
+
+# 音声キャプチャ (WASAPI ループバック対応の PyAudio fork)
+PyAudioWPatch>=0.2.12.6
+
+# 音声認識 (Whisper 高速実装, CPU int8 対応)
+faster-whisper>=1.0.0
+
+# silero-vad は ONNX モデルを onnxruntime で直接実行する
+# (onnxruntime は faster-whisper の依存でも入るが明示する)
+onnxruntime>=1.16.0
+
+# 信号処理 (リサンプリング)
+numpy>=1.24
+scipy>=1.10
+
+# デスクトップ UI
+PySide6>=6.6
