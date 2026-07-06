@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.parse
 
 import requests
@@ -34,6 +35,7 @@ DATA_J_URL = JPX_BASE + "/markets/statistics-equities/misc/tvdivq0000001vg2-att/
 SCHEDULE_INDEX_URL = JPX_BASE + "/listing/event-schedules/financial-announcement/index.html"
 # 銘柄別の時価総額 Excel を探すページ候補 (構成変更に備え複数)
 MARKET_CAP_PAGES = [
+    JPX_BASE + "/markets/statistics-equities/monthly/index.html",
     JPX_BASE + "/markets/statistics-equities/misc/02.html",
     JPX_BASE + "/markets/statistics-equities/misc/index.html",
 ]
@@ -235,41 +237,66 @@ def classify_doc(title):
     return None
 
 
-def fetch_disclosures(days=35, limit=10000):
-    end = jst_now().date()
-    start = end - datetime.timedelta(days=days)
-    url = YANOSHIN_URL.format(start=start.strftime("%Y%m%d"), end=end.strftime("%Y%m%d"))
-    log(f"TDnet 開示取得: {url}")
-    data = http_get(url, params={"limit": limit}).json()
-    items = data.get("items", [])
-    log(f"開示 {len(items)} 件取得")
+def fetch_disclosures(days=35, per_day_limit=3000):
+    """TDnet 開示を日別に取得する。
 
-    out = []
-    for it in items:
-        t = it.get("Tdnet") or it  # 念のため両対応
-        title = str(t.get("title", "") or "")
-        doc_type = classify_doc(title)
-        if not doc_type:
+    期間一括だとレスポンスが大きくなり途中で切断されることがあるため、
+    1日ずつ取得して失敗した日はスキップする。
+    """
+    end = jst_now().date()
+    out, seen = [], set()
+    ok_days = fail_days = 0
+    for i in range(days):
+        d = end - datetime.timedelta(days=i)
+        if d.weekday() >= 5:  # 土日は開示なし
             continue
-        code = normalize_code(t.get("company_code", ""))
-        if not code:
+        ds = d.strftime("%Y%m%d")
+        url = YANOSHIN_URL.format(start=ds, end=ds)
+        items = None
+        for attempt in (1, 2):
+            try:
+                items = http_get(url, params={"limit": per_day_limit}).json().get("items", [])
+                break
+            except Exception as e:  # noqa: BLE001
+                log(f"  {ds}: 取得失敗 (試行{attempt}) {type(e).__name__}: {e}")
+                time.sleep(3)
+        if items is None:
+            fail_days += 1
             continue
-        pub = str(t.get("pubdate", "") or "").strip()
-        published_at = pub.replace(" ", "T") if pub else None
-        pdf_url = t.get("document_url") or ""
-        tid = str(t.get("id", "") or "")
-        if not tid:
-            tid = hashlib.md5(f"{code}|{published_at}|{title}".encode()).hexdigest()[:12]
-        out.append({
-            "key": tid,
-            "code": code,
-            "title": title,
-            "pdf_url": pdf_url,
-            "doc_type": doc_type,
-            "published_at": published_at,
-        })
+        ok_days += 1
+        day_count = 0
+        for it in items:
+            t = it.get("Tdnet") or it  # 念のため両対応
+            title = str(t.get("title", "") or "")
+            doc_type = classify_doc(title)
+            if not doc_type:
+                continue
+            code = normalize_code(t.get("company_code", ""))
+            if not code:
+                continue
+            pub = str(t.get("pubdate", "") or "").strip()
+            published_at = pub.replace(" ", "T") if pub else None
+            pdf_url = t.get("document_url") or ""
+            tid = str(t.get("id", "") or "")
+            if not tid:
+                tid = hashlib.md5(f"{code}|{published_at}|{title}".encode()).hexdigest()[:12]
+            if tid in seen:
+                continue
+            seen.add(tid)
+            day_count += 1
+            out.append({
+                "key": tid,
+                "code": code,
+                "title": title,
+                "pdf_url": pdf_url,
+                "doc_type": doc_type,
+                "published_at": published_at,
+            })
+        if day_count:
+            log(f"  {ds}: 決算関連 {day_count}件")
+        time.sleep(0.5)
     out.sort(key=lambda x: x["published_at"] or "", reverse=True)
-    log(f"決算関連開示: {len(out)}件")
+    log(f"決算関連開示: {len(out)}件 (成功{ok_days}日 / 失敗{fail_days}日)")
     return out
 
 
@@ -285,14 +312,22 @@ def fetch_market_caps():
         except Exception as e:  # noqa: BLE001
             log(f"時価総額ページ取得失敗 {page}: {e}")
             continue
-        # ページ内の Excel リンクのうち、ファイル名/周辺に「時価総額」を含むものを試す
+        # ページ内の Excel リンクのうち、アンカーテキストまたは直前の文脈
+        # (表の行見出し等) に「時価総額」を含むものを候補にする
         candidates = []
+        debug_lines = []
         for m in re.finditer(r'<a[^>]+href="([^"]+?\.xlsx?)"[^>]*>(.*?)</a>', html,
                              flags=re.IGNORECASE | re.DOTALL):
-            href, text = m.group(1), re.sub(r"<[^>]+>", "", m.group(2))
-            if "時価総額" in text or "jikasougaku" in href or "value" in href.lower():
+            href, text = m.group(1), re.sub(r"<[^>]+>", "", m.group(2)).strip()
+            context = re.sub(r"<[^>]+>", " ", html[max(0, m.start() - 600):m.start()])
+            context = re.sub(r"\s+", " ", context)[-120:]
+            debug_lines.append(f"    [{text[:30]}] {href.rsplit('/', 1)[-1]} ctx=...{context[-60:]}")
+            hay = text + " " + context + " " + href
+            if "時価総額" in hay or "jikasougaku" in hay.lower():
                 candidates.append(urllib.parse.urljoin(page, href))
-        log(f"{page}: 時価総額候補 {len(candidates)}件")
+        log(f"{page}: Excelリンク{len(debug_lines)}件 / 時価総額候補 {len(candidates)}件")
+        for line in debug_lines[:25]:
+            log(line)
         for url in candidates[:4]:
             try:
                 content = http_get(url).content
