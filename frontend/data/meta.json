@@ -1,1 +1,1 @@
-{"generated_at":"2026-07-06T11:06:44","sources":{"stocks":"JPX 東証上場銘柄一覧","schedule":"JPX 決算発表予定日","disclosures":"TDnet (やのしんWebAPI)","market_cap":"Yahoo Finance (取得できた銘柄のみ)"},"counts":{"stocks":3714,"market_caps":3712,"schedule":3138,"disclosures":675}}
+{"generated_at":"2026-07-06T11:35:12","sources":{"stocks":"JPX 東証上場銘柄一覧","schedule":"JPX 決算発表予定日","disclosures":"TDnet (やのしんWebAPI)","market_cap":"Yahoo Finance (取得できた銘柄のみ)","financials":"Yahoo Finance (巡回取得)"},"counts":{"stocks":3714,"market_caps":3712,"schedule":3138,"disclosures":675,"financials":400}}
