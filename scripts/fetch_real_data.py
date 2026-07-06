@@ -9,8 +9,9 @@ GitHub Pages 上の静的アプリ (frontend/local-api.js) がこの JSON を読
 - 決算発表予定: JPX「決算発表予定日」ページからリンクされる Excel
 - 決算短信:    TDnet (やのしんWebAPI 経由) の適時開示から
                決算短信・訂正短信・業績予想修正・決算説明資料を抽出
-- 時価総額:    JPX 統計ページの銘柄別時価総額 Excel (ベストエフォート。
-               取得できない場合は null のままにする)
+- 時価総額:    Yahoo Finance のバッチ quote API (ベストエフォート。
+               取得できない銘柄は null のままにする)
+               ※JPXの公開Excelは市場合計のみで銘柄別時価総額が無いため
 
 方針:
 - 各ソースは独立に失敗しうる。新データが空の場合は既存ファイルを
@@ -33,13 +34,9 @@ import requests
 JPX_BASE = "https://www.jpx.co.jp"
 DATA_J_URL = JPX_BASE + "/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
 SCHEDULE_INDEX_URL = JPX_BASE + "/listing/event-schedules/financial-announcement/index.html"
-# 銘柄別の時価総額 Excel を探すページ候補 (構成変更に備え複数)
-MARKET_CAP_PAGES = [
-    JPX_BASE + "/markets/statistics-equities/monthly/index.html",
-    JPX_BASE + "/markets/statistics-equities/misc/02.html",
-    JPX_BASE + "/markets/statistics-equities/misc/index.html",
-]
 YANOSHIN_URL = "https://webapi.yanoshin.jp/webapi/tdnet/list/{start}-{end}.json"
+YAHOO_CRUMB_URL = "https://query1.finance.yahoo.com/v1/test/getcrumb"
+YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; kessan-navi-updater/1.0)"}
 TIMEOUT = 90
@@ -301,108 +298,54 @@ def fetch_disclosures(days=35, per_day_limit=3000):
 
 
 # ---------------------------------------------------------------------------
-# 時価総額 (JPX 統計、ベストエフォート)
+# 時価総額 (Yahoo Finance、ベストエフォート)
 # ---------------------------------------------------------------------------
-def _parse_cap_file(content, label, debug=False):
-    """銘柄別時価総額 Excel から {code: 円} を抽出する。
+def fetch_market_caps(codes):
+    """Yahoo Finance のバッチ quote API から銘柄別時価総額(円)を取得する。
 
-    JPX の Excel は「コード」と「時価総額」の見出しが別々の行にある
-    2段ヘッダー構成のことがあるため、見出しセルを行をまたいで探す。
+    yfinance と同じ方式: クッキーと crumb を取得してから /v7/finance/quote を
+    100銘柄ずつ呼ぶ。失敗した銘柄・バッチはスキップし、取得できた分だけ返す。
     """
-    import pandas as pd
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    })
+    try:
+        s.get("https://fc.yahoo.com", timeout=30)
+        crumb = s.get(YAHOO_CRUMB_URL, timeout=30).text.strip()
+    except Exception as e:  # noqa: BLE001
+        log(f"時価総額: Yahoo crumb 取得失敗 ({type(e).__name__}: {e})")
+        return {}
+    if not crumb or "<" in crumb or len(crumb) > 32:
+        log(f"時価総額: crumb が無効 ({crumb[:40]!r})")
+        return {}
 
-    xls = pd.ExcelFile(io.BytesIO(content))
-    for sheet in xls.sheet_names:
-        raw = xls.parse(sheet, header=None, dtype=object)
-        n = min(len(raw), 25)
-        code_pos = cap_pos = None
-        for i in range(n):
-            for j, v in enumerate(raw.iloc[i].tolist()):
-                s = str(v)
-                if code_pos is None and "コード" in s:
-                    code_pos = (i, j)
-                if cap_pos is None and "時価総額" in s:
-                    cap_pos = (i, j)
-        if not code_pos or not cap_pos or abs(code_pos[0] - cap_pos[0]) > 3:
-            continue
-        header_idx = max(code_pos[0], cap_pos[0])
-        c_code, c_cap = code_pos[1], cap_pos[1]
-        values = {}
-        for i in range(header_idx + 1, len(raw)):
-            r = raw.iloc[i].tolist()
-            code = normalize_code(r[c_code] if c_code < len(r) else "")
-            if not code:
-                continue
-            try:
-                v = float(str(r[c_cap]).replace(",", ""))
-            except (TypeError, ValueError):
-                continue
-            if v > 0:
-                values[code] = v
-        if len(values) > 1000:
-            # 単位 (円 or 百万円) をファイル全体の最大値から推定する。
-            # 最大の時価総額は数十兆円 = 数e13円 / 数e7百万円 のため、
-            # 最大値が 1e10 を超えていれば円単位とみなす。
-            vmax = max(values.values())
-            mult = 1 if vmax > 1e10 else 1_000_000
-            caps = {c: int(v * mult) for c, v in values.items()}
-            log(f"時価総額: {label} [{sheet}] から {len(caps)}件 (単位倍率 {mult})")
-            return caps
-        if debug and len(values) > 0:
-            log(f"  {label} [{sheet}]: 抽出 {len(values)}件のみ (閾値未満)")
-    if debug:
-        # 解析できなかった場合はレイアウトをログに残し、次回の改修に使う
-        for sheet in xls.sheet_names[:2]:
-            raw = xls.parse(sheet, header=None, dtype=object)
-            log(f"  {label} [{sheet}] 先頭行レイアウト:")
-            for i in range(min(len(raw), 6)):
-                cells = [str(v)[:14] for v in raw.iloc[i].tolist()[:9]]
-                log(f"    row{i}: {cells}")
-    return None
-
-
-def fetch_market_caps():
-    for page in MARKET_CAP_PAGES:
+    caps = {}
+    symbols = [c + ".T" for c in codes]
+    batches = fails = 0
+    for i in range(0, len(symbols), 100):
+        chunk = symbols[i:i + 100]
+        batches += 1
         try:
-            html = http_get(page).content.decode("utf-8", "replace")
+            r = s.get(YAHOO_QUOTE_URL, timeout=30, params={
+                "symbols": ",".join(chunk),
+                "fields": "marketCap",
+                "crumb": crumb,
+            })
+            r.raise_for_status()
+            for q in (r.json().get("quoteResponse", {}).get("result") or []):
+                sym = str(q.get("symbol", ""))
+                cap = q.get("marketCap")
+                if cap and sym.endswith(".T"):
+                    caps[sym[:-2]] = int(cap)
         except Exception as e:  # noqa: BLE001
-            log(f"時価総額ページ取得失敗 {page}: {e}")
-            continue
-        # ページ内の Excel リンクのうち、アンカーテキストまたは直前の文脈
-        # (表の行見出し等) に「時価総額」を含むものを候補にする
-        candidates = []
-        fallbacks = []
-        debug_lines = []
-        for m in re.finditer(r'<a[^>]+href="([^"]+?\.xlsx?)"[^>]*>(.*?)</a>', html,
-                             flags=re.IGNORECASE | re.DOTALL):
-            href, text = m.group(1), re.sub(r"<[^>]+>", "", m.group(2)).strip()
-            context = re.sub(r"<[^>]+>", " ", html[max(0, m.start() - 600):m.start()])
-            context = re.sub(r"\s+", " ", context)[-120:]
-            debug_lines.append(f"    [{text[:30]}] {href.rsplit('/', 1)[-1]} ctx=...{context[-60:]}")
-            hay = text + " " + context + " " + href
-            full = urllib.parse.urljoin(page, href)
-            if "時価総額" in hay or "jikasougaku" in hay.lower():
-                candidates.append(full)
-            elif re.search(r"historical|souba|month", href, flags=re.IGNORECASE):
-                # 月間相場表 (銘柄別の月末時価総額を含む場合がある) も解析を試す
-                fallbacks.append(full)
-        candidates.extend(fallbacks[:2])
-        log(f"{page}: Excelリンク{len(debug_lines)}件 / 時価総額候補 {len(candidates)}件")
-        for line in debug_lines[:25]:
-            log(line)
-        for url in candidates[:4]:
-            label = url.rsplit("/", 1)[-1]
-            try:
-                content = http_get(url).content
-                # 「jika(時価)」を含むファイルは本命なので、失敗時に
-                # レイアウトをログへ出力して次回の改修に役立てる
-                caps = _parse_cap_file(content, label, debug=("jika" in label.lower()))
-                if caps:
-                    return caps
-            except Exception as e:  # noqa: BLE001
-                log(f"  {label}: 解析失敗 ({type(e).__name__}: {e})")
-    log("時価総額: 取得できず (null のままにします)")
-    return {}
+            fails += 1
+            if fails <= 3:
+                log(f"  Yahoo quote バッチ{batches}失敗: {type(e).__name__}: {e}")
+        time.sleep(0.4)
+    log(f"時価総額: Yahoo Finance から {len(caps)}件 ({batches}バッチ中 失敗{fails})")
+    return caps
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +374,7 @@ def main():
     # 2) 時価総額 (ベストエフォート)
     caps = {}
     try:
-        caps = fetch_market_caps()
+        caps = fetch_market_caps(sorted(stocks.keys()))
     except Exception as e:  # noqa: BLE001
         log(f"時価総額の取得でエラー: {e}")
     for code, cap in caps.items():
@@ -485,7 +428,7 @@ def main():
             "stocks": "JPX 東証上場銘柄一覧",
             "schedule": "JPX 決算発表予定日",
             "disclosures": "TDnet (やのしんWebAPI)",
-            "market_cap": "JPX 統計 (取得できた場合)",
+            "market_cap": "Yahoo Finance (取得できた銘柄のみ)",
         },
         "counts": {
             "stocks": len(stocks),
