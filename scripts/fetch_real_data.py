@@ -37,6 +37,7 @@ SCHEDULE_INDEX_URL = JPX_BASE + "/listing/event-schedules/financial-announcement
 YANOSHIN_URL = "https://webapi.yanoshin.jp/webapi/tdnet/list/{start}-{end}.json"
 YAHOO_CRUMB_URL = "https://query1.finance.yahoo.com/v1/test/getcrumb"
 YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
+YAHOO_TS_URL = "https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{sym}"
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; kessan-navi-updater/1.0)"}
 TIMEOUT = 90
@@ -298,13 +299,12 @@ def fetch_disclosures(days=35, per_day_limit=3000):
 
 
 # ---------------------------------------------------------------------------
-# 時価総額 (Yahoo Finance、ベストエフォート)
+# Yahoo Finance (時価総額・財務数値。ベストエフォート)
 # ---------------------------------------------------------------------------
-def fetch_market_caps(codes):
-    """Yahoo Finance のバッチ quote API から銘柄別時価総額(円)を取得する。
+def yahoo_session():
+    """Yahoo Finance 用のセッションと crumb を用意する (yfinance と同方式)。
 
-    yfinance と同じ方式: クッキーと crumb を取得してから /v7/finance/quote を
-    100銘柄ずつ呼ぶ。失敗した銘柄・バッチはスキップし、取得できた分だけ返す。
+    失敗した場合は (None, None) を返す。
     """
     s = requests.Session()
     s.headers.update({
@@ -315,12 +315,20 @@ def fetch_market_caps(codes):
         s.get("https://fc.yahoo.com", timeout=30)
         crumb = s.get(YAHOO_CRUMB_URL, timeout=30).text.strip()
     except Exception as e:  # noqa: BLE001
-        log(f"時価総額: Yahoo crumb 取得失敗 ({type(e).__name__}: {e})")
-        return {}
+        log(f"Yahoo crumb 取得失敗 ({type(e).__name__}: {e})")
+        return None, None
     if not crumb or "<" in crumb or len(crumb) > 32:
-        log(f"時価総額: crumb が無効 ({crumb[:40]!r})")
-        return {}
+        log(f"Yahoo crumb が無効 ({crumb[:40]!r})")
+        return None, None
+    return s, crumb
 
+
+def fetch_market_caps(codes, s, crumb):
+    """Yahoo Finance のバッチ quote API から銘柄別時価総額(円)を取得する。
+
+    /v7/finance/quote を100銘柄ずつ呼ぶ。失敗した銘柄・バッチはスキップし、
+    取得できた分だけ返す。
+    """
     caps = {}
     symbols = [c + ".T" for c in codes]
     batches = fails = 0
@@ -349,6 +357,97 @@ def fetch_market_caps(codes):
 
 
 # ---------------------------------------------------------------------------
+# 財務数値の推移 (Yahoo fundamentals-timeseries、巡回取得)
+# ---------------------------------------------------------------------------
+TS_TYPES = [
+    "annualTotalRevenue", "annualOperatingIncome", "annualNetIncome", "annualDilutedEPS",
+    "quarterlyTotalRevenue", "quarterlyOperatingIncome", "quarterlyNetIncome", "quarterlyDilutedEPS",
+]
+
+
+def parse_timeseries(payload):
+    """Yahoo fundamentals-timeseries 応答を {a: [...], q: [...]} に変換する。
+
+    各要素は [期末日, 売上高, 営業利益, 純利益, EPS] (取得できない値は None)。
+    """
+    annual, quarterly = {}, {}
+    for block in (payload.get("timeseries", {}).get("result") or []):
+        types = (block.get("meta") or {}).get("type") or []
+        if not types:
+            continue
+        tname = types[0]
+        for row in (block.get(tname) or []):
+            if not row:
+                continue
+            d = row.get("asOfDate")
+            v = (row.get("reportedValue") or {}).get("raw")
+            if d is None or v is None:
+                continue
+            bucket = annual if tname.startswith("annual") else quarterly
+            metric = tname.replace("annual", "").replace("quarterly", "")
+            bucket.setdefault(d, {})[metric] = v
+
+    def pack(bucket):
+        out = []
+        for d in sorted(bucket):
+            m = bucket[d]
+            out.append([
+                d,
+                m.get("TotalRevenue"),
+                m.get("OperatingIncome"),
+                m.get("NetIncome"),
+                m.get("DilutedEPS"),
+            ])
+        return out[-12:]  # 直近12期分まで保持
+
+    return {"a": pack(annual), "q": pack(quarterly)}
+
+
+def fetch_financials(codes, existing, s, crumb, per_run=400):
+    """財務数値の推移を巡回取得する。
+
+    Yahoo の fundamentals-timeseries は銘柄ごとに1リクエスト必要なため、
+    1回の実行では per_run 銘柄だけ更新し、実行ごとにローテーションする
+    (データ無し → 最終取得が古い順)。結果は existing にマージされる。
+    """
+    stocks_data = existing.setdefault("stocks", {})
+    today = jst_now().strftime("%Y-%m-%d")
+    order = sorted(codes, key=lambda c: (stocks_data.get(c, {}).get("t", ""), c))
+    targets = order[:per_run]
+    now_ts = int(time.time())
+    ok = fails = empty = 0
+    for code in targets:
+        sym = code + ".T"
+        try:
+            r = s.get(YAHOO_TS_URL.format(sym=sym), timeout=30, params={
+                "symbol": sym,
+                "type": ",".join(TS_TYPES),
+                "period1": "1420070400",  # 2015-01-01
+                "period2": str(now_ts),
+                "merge": "false",
+                "crumb": crumb,
+            })
+            r.raise_for_status()
+            entry = parse_timeseries(r.json())
+            entry["t"] = today
+            if entry["a"] or entry["q"]:
+                stocks_data[code] = entry
+                ok += 1
+            else:
+                # データが無い銘柄も t を記録し、毎回問い合わせないようにする
+                old = stocks_data.get(code, {})
+                stocks_data[code] = {"a": old.get("a", []), "q": old.get("q", []), "t": today}
+                empty += 1
+        except Exception as e:  # noqa: BLE001
+            fails += 1
+            if fails <= 3:
+                log(f"  財務 {sym} 失敗: {type(e).__name__}: {e}")
+        time.sleep(0.35)
+    log(f"財務数値: 更新{ok}件 / データ無し{empty}件 / 失敗{fails}件 (対象{len(targets)}銘柄)")
+    return existing
+
+
+# ---------------------------------------------------------------------------
 # 出力
 # ---------------------------------------------------------------------------
 def write_json(path, payload):
@@ -363,6 +462,8 @@ def main():
     parser.add_argument("--days", type=int, default=7,
                         help="開示の取得日数 (既存データとマージするため通常は直近数日で足りる)")
     parser.add_argument("--keep-days", type=int, default=45, help="開示の保持日数")
+    parser.add_argument("--fin-per-run", type=int, default=400,
+                        help="1回の実行で財務数値を更新する銘柄数 (巡回)")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -371,15 +472,36 @@ def main():
     # 1) 銘柄マスタ (失敗したら致命的)
     stocks = fetch_stock_master()
 
-    # 2) 時価総額 (ベストエフォート)
+    # 2) 時価総額 + 財務数値 (Yahoo Finance、ベストエフォート)
+    ysession, ycrumb = yahoo_session()
     caps = {}
-    try:
-        caps = fetch_market_caps(sorted(stocks.keys()))
-    except Exception as e:  # noqa: BLE001
-        log(f"時価総額の取得でエラー: {e}")
+    if ysession:
+        try:
+            caps = fetch_market_caps(sorted(stocks.keys()), ysession, ycrumb)
+        except Exception as e:  # noqa: BLE001
+            log(f"時価総額の取得でエラー: {e}")
     for code, cap in caps.items():
         if code in stocks:
             stocks[code]["market_cap"] = cap
+
+    fin_path = os.path.join(args.out, "financials.json")
+    financials = {"stocks": {}}
+    try:
+        with open(fin_path, encoding="utf-8") as f:
+            loaded = json.load(f)
+            if isinstance(loaded, dict) and isinstance(loaded.get("stocks"), dict):
+                financials = loaded
+    except (OSError, ValueError):
+        pass
+    if ysession:
+        try:
+            fetch_financials(sorted(stocks.keys()), financials, ysession, ycrumb,
+                             per_run=args.fin_per_run)
+        except Exception as e:  # noqa: BLE001
+            log(f"財務数値の取得でエラー: {e}")
+    # 上場廃止銘柄の掃除
+    financials["stocks"] = {c: v for c, v in financials["stocks"].items() if c in stocks}
+    financials["updated_at"] = generated_at
 
     # 3) 決算発表予定
     schedule = []
@@ -421,7 +543,9 @@ def main():
         write_json(disc_path, disclosures)
     else:
         log("開示が空のため disclosures.json は更新しません")
+    write_json(fin_path, financials)
 
+    fin_count = sum(1 for v in financials["stocks"].values() if v.get("a") or v.get("q"))
     meta = {
         "generated_at": generated_at,
         "sources": {
@@ -429,12 +553,14 @@ def main():
             "schedule": "JPX 決算発表予定日",
             "disclosures": "TDnet (やのしんWebAPI)",
             "market_cap": "Yahoo Finance (取得できた銘柄のみ)",
+            "financials": "Yahoo Finance (巡回取得)",
         },
         "counts": {
             "stocks": len(stocks),
             "market_caps": len(caps),
             "schedule": len(schedule),
             "disclosures": len(disclosures),
+            "financials": fin_count,
         },
     }
     write_json(os.path.join(args.out, "meta.json"), meta)

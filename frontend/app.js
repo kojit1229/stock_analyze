@@ -613,6 +613,569 @@ async function runFetch() {
 }
 
 // ---------------------------------------------------------------------------
+// 銘柄分析 / 銘柄比較 (クライアントサイド機能層)
+//
+// これらのタブはバックエンドに依存せず、以下のデータで動作する:
+// - data/financials.json : GitHub Actions が蓄積する財務数値の推移 (遅延ロード)
+// - TDnet ミラーAPI (やのしん) : 銘柄単位の過去2年分の決算短信メタデータ
+// - localStorage : 分析コメント・取得済み開示履歴・比較銘柄リスト
+// ---------------------------------------------------------------------------
+let _finCache = null;
+async function loadFinancials() {
+  if (_finCache) return _finCache;
+  try {
+    const res = await fetch("data/financials.json", { cache: "no-cache" });
+    if (!res.ok) throw new Error(String(res.status));
+    const data = await res.json();
+    _finCache = (data && data.stocks) ? data : { stocks: {} };
+  } catch (e) {
+    _finCache = { stocks: {} };
+  }
+  return _finCache;
+}
+
+const ANALYSIS_KEY = "kessan_analysis_v1";
+function loadAnalysisState() {
+  try {
+    const s = JSON.parse(localStorage.getItem(ANALYSIS_KEY));
+    if (s && typeof s === "object") {
+      return { comments: s.comments || {}, history: s.history || {} };
+    }
+  } catch (e) { /* 初期化 */ }
+  return { comments: {}, history: {} };
+}
+const analysisState = loadAnalysisState();
+function saveAnalysisState() {
+  try { localStorage.setItem(ANALYSIS_KEY, JSON.stringify(analysisState)); } catch (e) { /* 容量超過等は無視 */ }
+}
+
+const COMPARE_KEY = "kessan_compare_v1";
+function loadCompareCodes() {
+  try {
+    const s = JSON.parse(localStorage.getItem(COMPARE_KEY));
+    if (Array.isArray(s)) return s.slice(0, 4);
+  } catch (e) { /* 初期化 */ }
+  return [];
+}
+let compareCodes = loadCompareCodes();
+function saveCompareCodes() {
+  try { localStorage.setItem(COMPARE_KEY, JSON.stringify(compareCodes)); } catch (e) { /* 無視 */ }
+}
+
+// ---- 数値フォーマット ----
+function fmtMoney(v) {
+  if (v == null || !isFinite(v)) return "-";
+  const a = Math.abs(v);
+  if (a >= 1e12) return (v / 1e12).toFixed(2) + "兆円";
+  if (a >= 1e8) return Math.round(v / 1e8).toLocaleString("en-US") + "億円";
+  return Math.round(v).toLocaleString("en-US") + "円";
+}
+function fmtPct(v, digits) {
+  if (v == null || !isFinite(v)) return "-";
+  return v.toFixed(digits == null ? 1 : digits) + "%";
+}
+function yoyPct(cur, prev) {
+  if (cur == null || prev == null || !isFinite(cur) || !isFinite(prev) || prev === 0) return null;
+  return ((cur - prev) / Math.abs(prev)) * 100;
+}
+function periodLabel(d) {
+  if (!d || d.length < 7) return String(d || "");
+  return d.slice(2, 4) + "/" + String(Number(d.slice(5, 7)));
+}
+
+// ---- SVGチャート (依存ライブラリなし) ----
+const CHART_COLORS = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#a78bfa", "#2dd4bf"];
+
+function fmtAxisVal(v, unit) {
+  if (unit === "pct") return v.toFixed(0) + "%";
+  if (unit === "yen") return Math.round(v).toLocaleString("en-US");
+  const a = Math.abs(v);
+  if (a >= 1e12) return (v / 1e12).toFixed(1) + "兆";
+  if (a >= 1e8) return Math.round(v / 1e8).toLocaleString("en-US") + "億";
+  if (a === 0) return "0";
+  return v.toLocaleString("en-US");
+}
+
+function chartSVG({ title, labels, series, unit }) {
+  const W = 560, H = 220, PL = 64, PR = 10, PT = 12, PB = 30;
+  const iw = W - PL - PR, ih = H - PT - PB;
+  const all = series.flatMap((s) => s.values).filter((v) => v != null && isFinite(v));
+  if (!all.length || !labels.length) {
+    return `<div class="chart-box"><div class="chart-title">${h(title)}</div><div class="empty" style="padding:24px 10px">データがありません</div></div>`;
+  }
+  let min = Math.min(0, ...all), max = Math.max(0, ...all);
+  if (min === max) max = min + 1;
+  const span = max - min;
+  max += span * 0.08;
+  if (min < 0) min -= span * 0.05;
+  const y = (v) => PT + ih - ((v - min) / (max - min)) * ih;
+  const xc = (i) => PL + (i + 0.5) * (iw / labels.length);
+  let g = "";
+  for (let t = 0; t <= 4; t++) {
+    const v = min + ((max - min) * t) / 4, yy = y(v);
+    g += `<line x1="${PL}" y1="${yy.toFixed(1)}" x2="${W - PR}" y2="${yy.toFixed(1)}" stroke="#2a3448" stroke-width="1"/>`;
+    g += `<text x="${PL - 6}" y="${(yy + 3.5).toFixed(1)}" text-anchor="end" class="chart-tick">${fmtAxisVal(v, unit)}</text>`;
+  }
+  if (min < 0) {
+    g += `<line x1="${PL}" y1="${y(0).toFixed(1)}" x2="${W - PR}" y2="${y(0).toFixed(1)}" stroke="#5b6b85" stroke-width="1.2"/>`;
+  }
+  const step = labels.length > 8 ? Math.ceil(labels.length / 8) : 1;
+  labels.forEach((lb, i) => {
+    if (i % step) return;
+    g += `<text x="${xc(i).toFixed(1)}" y="${H - 8}" text-anchor="middle" class="chart-tick">${h(lb)}</text>`;
+  });
+  const barSeries = series.filter((s) => s.type !== "line");
+  if (barSeries.length) {
+    const bw = Math.max(4, Math.min(26, ((iw / labels.length) * 0.72) / barSeries.length));
+    barSeries.forEach((s, si) => {
+      s.values.forEach((v, i) => {
+        if (v == null || !isFinite(v)) return;
+        const x = xc(i) - (bw * barSeries.length) / 2 + si * bw;
+        const top = Math.min(y(v), y(0));
+        const hgt = Math.max(1.5, Math.abs(y(0) - y(v)));
+        g += `<rect x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${(bw - 1.5).toFixed(1)}" height="${hgt.toFixed(1)}" fill="${s.color}" rx="2"/>`;
+      });
+    });
+  }
+  series.filter((s) => s.type === "line").forEach((s) => {
+    const pts = [];
+    s.values.forEach((v, i) => {
+      if (v != null && isFinite(v)) pts.push(`${xc(i).toFixed(1)},${y(v).toFixed(1)}`);
+    });
+    if (pts.length > 1) g += `<polyline points="${pts.join(" ")}" fill="none" stroke="${s.color}" stroke-width="2"/>`;
+    s.values.forEach((v, i) => {
+      if (v != null && isFinite(v)) g += `<circle cx="${xc(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="3" fill="${s.color}"/>`;
+    });
+  });
+  const legend = series.map((s) => `<span class="chart-leg"><i style="background:${s.color}"></i>${h(s.name)}</span>`).join("");
+  return `<div class="chart-box"><div class="chart-title">${h(title)}</div>
+    <svg viewBox="0 0 ${W} ${H}" class="chart-svg" role="img">${g}</svg>
+    <div class="chart-legend">${legend}</div></div>`;
+}
+
+// ---- TDnet ミラーAPI (やのしん) から銘柄単位の開示履歴を取得 ----
+const YANOSHIN_LIST = "https://webapi.yanoshin.jp/webapi/tdnet/list/";
+
+function classifyDocJs(title) {
+  if (title.includes("訂正") && title.includes("短信")) return "訂正決算短信";
+  if (title.includes("決算短信")) return "決算短信";
+  if (title.includes("業績予想")) return "業績予想修正";
+  if (title.includes("決算説明")) return "決算説明資料";
+  return null;
+}
+
+function jsonpFetch(src, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const cb = "__yano_" + Math.random().toString(36).slice(2, 10);
+    const s = document.createElement("script");
+    const timer = setTimeout(() => { cleanup(); reject(new Error("タイムアウト")); }, timeoutMs || 20000);
+    function cleanup() { clearTimeout(timer); delete window[cb]; s.remove(); }
+    window[cb] = (data) => { cleanup(); resolve(data); };
+    s.src = src + cb;
+    s.onerror = () => { cleanup(); reject(new Error("読み込み失敗")); };
+    document.head.appendChild(s);
+  });
+}
+
+async function fetchCompanyHistory(code, years) {
+  const url = `${YANOSHIN_LIST}${encodeURIComponent(code)}.json?limit=300`;
+  let data;
+  try {
+    const res = await fetch(url, { mode: "cors" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    data = await res.json();
+  } catch (e) {
+    // CORS 不可の場合は JSONP にフォールバック
+    data = await jsonpFetch(url + "&callback=");
+  }
+  const cutoff = new Date();
+  cutoff.setFullYear(cutoff.getFullYear() - (years || 2));
+  const cutStr = cutoff.toISOString().slice(0, 10);
+  const items = [];
+  for (const it of ((data && data.items) || [])) {
+    const t = it.Tdnet || it;
+    const title = String(t.title || "");
+    const docType = classifyDocJs(title);
+    if (!docType) continue;
+    const pub = String(t.pubdate || "").replace(" ", "T");
+    if (!pub || pub.slice(0, 10) < cutStr) continue;
+    items.push({
+      key: String(t.id || pub + title.slice(0, 12)),
+      title,
+      doc_type: docType,
+      published_at: pub,
+      pdf_url: t.document_url || "",
+    });
+  }
+  items.sort((a, b) => (a.published_at > b.published_at ? -1 : 1));
+  return items;
+}
+
+async function bulkFetchHistory(codes, statusEl) {
+  let done = 0, ok = 0;
+  const failed = [];
+  for (const code of codes) {
+    if (statusEl) statusEl.textContent = `取得中… ${done + 1}/${codes.length} (${code})`;
+    try {
+      const items = await fetchCompanyHistory(code, 2);
+      analysisState.history[code] = {
+        fetched_at: new Date().toISOString().slice(0, 19),
+        items,
+      };
+      saveAnalysisState();
+      ok++;
+    } catch (e) {
+      failed.push(code);
+    }
+    done++;
+    await new Promise((r) => setTimeout(r, 700));
+  }
+  if (statusEl) {
+    statusEl.textContent = failed.length
+      ? `完了: ${ok}/${codes.length}銘柄を取得 (失敗: ${failed.join(", ")})`
+      : `完了: ${ok}銘柄の決算短信履歴(直近2年分)を取得しました`;
+  }
+  return ok;
+}
+
+// 開示履歴の表示 (キャッシュ + 全体データをマージ)
+function mergedHistory(code, globalItems) {
+  const seen = new Set();
+  const out = [];
+  const cached = (analysisState.history[code] || {}).items || [];
+  for (const it of [...cached, ...(globalItems || [])]) {
+    const k = (it.published_at || "").slice(0, 16) + "|" + (it.title || "").slice(0, 30);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(it);
+  }
+  out.sort((a, b) => ((a.published_at || "") > (b.published_at || "") ? -1 : 1));
+  return out;
+}
+
+function historyRow(it) {
+  const fresh = (() => {
+    const d = new Date(it.published_at);
+    return isFinite(d) && (Date.now() - d.getTime()) < 40 * 86400e3;
+  })();
+  const corr = it.doc_type && it.doc_type.startsWith("訂正") ? "warn" : "market";
+  const searchQ = encodeURIComponent(it.title.slice(0, 60) + " PDF");
+  const link = it.pdf_url
+    ? `<a class="link" href="${h(it.pdf_url)}" target="_blank" rel="noopener">${h(it.title)}</a>`
+    : h(it.title);
+  return `<tr>
+    <td>${fmtDateTime(it.published_at)}</td>
+    <td><span class="badge ${corr}">${h(it.doc_type || "")}</span></td>
+    <td>${link}${fresh ? "" : ` <a class="link" href="https://www.google.com/search?q=${searchQ}" target="_blank" rel="noopener" title="TDnetの掲載期間(約1ヶ月)を過ぎたPDFは削除されている場合があります。Webを検索します">🔎</a>`}</td>
+  </tr>`;
+}
+
+// ---------------------------------------------------------------------------
+// 銘柄分析タブ
+// ---------------------------------------------------------------------------
+const analysisView = { mode: "a" }; // a=年次 / q=四半期
+
+route("analysis", async (app, rest) => {
+  const code = rest && rest[0] ? decodeURIComponent(rest[0]) : null;
+  const my = await api.get("/mystocks");
+  const myOptions = my.items.map((m) =>
+    `<option value="${h(m.code)}" ${m.code === code ? "selected" : ""}>${h(m.code)} ${h(m.name)}</option>`).join("");
+  const checkboxes = my.items.map((m) =>
+    `<label><input type="checkbox" value="${h(m.code)}" checked> ${h(m.code)} ${h(m.name)}</label>`).join("");
+
+  app.innerHTML = `
+    <div class="page-head"><h1>銘柄分析</h1><span class="sub">決算短信の情報と数値推移から個別銘柄を分析します</span></div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="picker-bar">
+        <div class="field" style="flex-direction:row;align-items:center;gap:8px">
+          <label style="font-size:12px">マイ銘柄から</label>
+          <select id="an_select"><option value="">選択してください</option>${myOptions}</select>
+        </div>
+        <div class="field" style="flex-direction:row;align-items:center;gap:8px">
+          <label style="font-size:12px">またはコード</label>
+          <input id="an_code" placeholder="例: 7203" value="${code && !my.items.some((m) => m.code === code) ? h(code) : ""}" style="width:110px">
+        </div>
+        <button class="btn" id="an_show">分析する</button>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <h2>📥 決算短信のまとめて取得（直近2年分）</h2>
+      ${my.count ? `
+        <div class="meta-line">対象のマイ銘柄を選んで、TDnetミラー(やのしんWebAPI)から決算短信・訂正短信・業績予想修正・決算説明資料の履歴を取得します。</div>
+        <div class="checklist" id="an_checklist">${checkboxes}</div>
+        <button class="btn" id="an_bulk">選択した銘柄の決算短信をまとめて取得</button>
+        <div class="fetch-status" id="an_bulk_status"></div>
+        <div class="meta-line">※ TDnet本体の掲載期間(約1ヶ月)を過ぎた資料はPDFリンクが切れている場合があります(🔎でWeb検索できます)。取得結果はこのブラウザに保存されます。</div>
+      ` : '<div class="empty">マイ銘柄が未登録です。<a class="link" href="#/schedule">決算予定</a>から登録すると、まとめて取得できます。</div>'}
+    </div>
+    <div id="an_body">${code ? '<div class="loading">読み込み中…</div>' : '<div class="empty">銘柄を選択してください</div>'}</div>`;
+
+  const show = () => {
+    const c = el("an_select").value || el("an_code").value.trim();
+    if (c) location.hash = "#/analysis/" + encodeURIComponent(c);
+  };
+  el("an_show").onclick = show;
+  el("an_select").onchange = show;
+  const bulkBtn = el("an_bulk");
+  if (bulkBtn) {
+    bulkBtn.onclick = async () => {
+      const codes = [...document.querySelectorAll("#an_checklist input:checked")].map((x) => x.value);
+      if (!codes.length) { toast("銘柄を選択してください", true); return; }
+      bulkBtn.disabled = true;
+      try {
+        await bulkFetchHistory(codes, el("an_bulk_status"));
+        if (code) renderAnalysisBody(code);
+      } finally {
+        bulkBtn.disabled = false;
+      }
+    };
+  }
+  if (code) await renderAnalysisBody(code);
+});
+
+async function renderAnalysisBody(code) {
+  const body = el("an_body");
+  if (!body) return;
+  let stock;
+  try {
+    stock = await api.get("/stocks/" + encodeURIComponent(code));
+  } catch (e) {
+    body.innerHTML = `<div class="empty">エラー: ${h(e.message)}</div>`;
+    return;
+  }
+  const findata = await loadFinancials();
+  const fin = findata.stocks[code] || { a: [], q: [] };
+  const rows = analysisView.mode === "q" ? (fin.q || []) : (fin.a || []);
+  const labels = rows.map((r) => periodLabel(r[0]));
+  const val = (i) => rows.map((r) => (r[i] == null ? null : r[i]));
+  const rev = val(1), op = val(2), ni = val(3), eps = val(4);
+  const opm = rows.map((r) => (r[1] && r[2] != null ? (r[2] / r[1]) * 100 : null));
+
+  // 直近期のサマリ (年次ベース)
+  const a = fin.a || [];
+  const last = a[a.length - 1], prev = a[a.length - 2];
+  const sum = (label, v, yoy, fmt) => `
+    <div class="card stat"><div class="label">${label}</div>
+      <div class="value" style="font-size:20px">${fmt(v)}</div>
+      ${yoy == null ? "" : `<div class="meta-line" style="margin-top:2px">前期比 <span style="color:${yoy >= 0 ? "#4ade80" : "#f87171"}">${yoy >= 0 ? "+" : ""}${yoy.toFixed(1)}%</span></div>`}
+    </div>`;
+
+  const hist = mergedHistory(code, stock.disclosures && stock.disclosures.length
+    ? stock.disclosures.map((d) => ({ key: String(d.id), title: d.title, doc_type: d.doc_type, published_at: d.published_at, pdf_url: d.pdf_url || "" }))
+    : []);
+  const cachedInfo = analysisState.history[code];
+  const comment = analysisState.comments[code] || "";
+
+  body.innerHTML = `
+    <div class="detail-head" style="margin-bottom:12px">
+      <span class="code">${h(stock.code)}</span><span class="name">${h(stock.name)}</span>
+      <span class="badge market">${h(stock.market || "")}</span>
+      <span class="badge market">${h(stock.sector || "")}</span>
+      <span class="sub">時価総額 ${h(stock.market_cap_label || "-")}</span>
+      <a class="link" href="#/stock/${h(stock.code)}" style="margin-left:auto;font-size:12px">銘柄詳細 →</a>
+    </div>
+    ${last ? `<div class="grid cols-4" style="margin-bottom:14px">
+      ${sum(`売上高 (${periodLabel(last[0])}期)`, last[1], yoyPct(last[1], prev && prev[1]), fmtMoney)}
+      ${sum("営業利益", last[2], yoyPct(last[2], prev && prev[2]), fmtMoney)}
+      ${sum("営業利益率", last[1] && last[2] != null ? (last[2] / last[1]) * 100 : null, null, fmtPct)}
+      ${sum("EPS", last[4], yoyPct(last[4], prev && prev[4]), (v) => (v == null ? "-" : v.toFixed(1) + "円"))}
+    </div>` : '<div class="card" style="margin-bottom:14px"><div class="empty">財務数値データがまだありません(データ更新の巡回取得をお待ちください)</div></div>'}
+    <div class="card" style="margin-bottom:14px">
+      <h2>📊 決算数値の推移
+        <span style="margin-left:auto;display:inline-flex;gap:6px">
+          <span class="chip ${analysisView.mode === "a" ? "active" : ""}" id="an_mode_a">年次</span>
+          <span class="chip ${analysisView.mode === "q" ? "active" : ""}" id="an_mode_q">四半期</span>
+        </span></h2>
+      <div class="charts-grid">
+        ${chartSVG({ title: "売上高", labels, series: [{ name: "売上高", color: CHART_COLORS[0], values: rev }] })}
+        ${chartSVG({ title: "営業利益・純利益", labels, series: [
+          { name: "営業利益", color: CHART_COLORS[1], values: op },
+          { name: "純利益", color: CHART_COLORS[2], values: ni }] })}
+        ${chartSVG({ title: "営業利益率", labels, unit: "pct", series: [{ name: "営業利益率", color: CHART_COLORS[4], values: opm, type: "line" }] })}
+        ${chartSVG({ title: "EPS", labels, unit: "yen", series: [{ name: "EPS(円)", color: CHART_COLORS[3], values: eps, type: "line" }] })}
+      </div>
+      <div class="meta-line">出典: Yahoo Finance (年次は直近${(fin.a || []).length}期 / 四半期は取得できる範囲)。単位: 円。</div>
+    </div>
+    <div class="grid cols-2" style="grid-template-columns:3fr 2fr">
+      <div class="card">
+        <h2>📄 決算短信・開示履歴 <span class="count">${hist.length}件</span>
+          <span style="margin-left:auto"><button class="btn small ghost" id="an_fetch_one">この銘柄の2年分を取得</button></span></h2>
+        ${cachedInfo ? `<div class="meta-line">履歴取得: ${fmtDateTime(cachedInfo.fetched_at)}</div>` : ""}
+        <div class="fetch-status" id="an_one_status"></div>
+        ${hist.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>公開日時</th><th>種別</th><th>タイトル</th></tr></thead>
+          <tbody>${hist.map(historyRow).join("")}</tbody></table></div>`
+        : '<div class="empty">開示履歴がありません。「この銘柄の2年分を取得」を実行してください。</div>'}
+      </div>
+      <div class="card">
+        <h2>✏️ 分析コメント</h2>
+        <textarea id="an_comment" style="min-height:140px" placeholder="この銘柄の分析メモを入力 (例: 増収増益が続く。来期ガイダンスは保守的…)">${h(comment)}</textarea>
+        <div style="margin-top:8px;text-align:right"><button class="btn small" id="an_comment_save">保存</button></div>
+        <div class="meta-line">コメントはこのブラウザに保存されます。</div>
+      </div>
+    </div>`;
+
+  el("an_mode_a").onclick = () => { analysisView.mode = "a"; renderAnalysisBody(code); };
+  el("an_mode_q").onclick = () => { analysisView.mode = "q"; renderAnalysisBody(code); };
+  el("an_comment_save").onclick = () => {
+    analysisState.comments[code] = el("an_comment").value;
+    saveAnalysisState();
+    toast("コメントを保存しました");
+  };
+  el("an_fetch_one").onclick = async () => {
+    const btn = el("an_fetch_one");
+    btn.disabled = true;
+    try {
+      await bulkFetchHistory([code], el("an_one_status"));
+      renderAnalysisBody(code);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 銘柄比較タブ
+// ---------------------------------------------------------------------------
+route("compare", async (app) => {
+  const my = await api.get("/mystocks");
+  const quickAdd = my.items
+    .filter((m) => !compareCodes.includes(m.code))
+    .map((m) => `<button class="btn small ghost" data-add="${h(m.code)}">＋ ${h(m.code)} ${h(m.name)}</button>`)
+    .join(" ");
+
+  app.innerHTML = `
+    <div class="page-head"><h1>銘柄比較分析</h1><span class="sub">最大4銘柄の業績・指標を並べて比較します</span></div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="picker-bar">
+        <input id="cmp_code" placeholder="銘柄コードを追加 (例: 7203)" style="width:180px">
+        <button class="btn" id="cmp_add">追加</button>
+        <span id="cmp_chips" style="display:inline-flex;gap:8px;flex-wrap:wrap">
+          ${compareCodes.map((c) => `<span class="cmp-chip">${h(c)}<button data-del="${h(c)}" title="削除">✕</button></span>`).join("")}
+        </span>
+      </div>
+      ${quickAdd ? `<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">${quickAdd}</div>` : ""}
+    </div>
+    <div id="cmp_body"><div class="loading">読み込み中…</div></div>`;
+
+  const addCode = async (c) => {
+    c = String(c || "").trim();
+    if (!c) return;
+    if (compareCodes.includes(c)) { toast("既に追加されています", true); return; }
+    if (compareCodes.length >= 4) { toast("比較は最大4銘柄までです", true); return; }
+    try {
+      await api.get("/stocks/" + encodeURIComponent(c)); // 存在チェック
+    } catch (e) {
+      toast(e.message, true);
+      return;
+    }
+    compareCodes.push(c);
+    saveCompareCodes();
+    render();
+  };
+  el("cmp_add").onclick = () => addCode(el("cmp_code").value);
+  el("cmp_code").addEventListener("keydown", (e) => { if (e.key === "Enter") addCode(el("cmp_code").value); });
+  app.querySelectorAll("[data-add]").forEach((b) => { b.onclick = () => addCode(b.dataset.add); });
+  app.querySelectorAll("[data-del]").forEach((b) => {
+    b.onclick = () => {
+      compareCodes = compareCodes.filter((c) => c !== b.dataset.del);
+      saveCompareCodes();
+      render();
+    };
+  });
+  await renderCompareBody();
+});
+
+async function renderCompareBody() {
+  const body = el("cmp_body");
+  if (!body) return;
+  if (!compareCodes.length) {
+    body.innerHTML = '<div class="empty">比較する銘柄を追加してください (マイ銘柄からのクイック追加、またはコード入力)</div>';
+    return;
+  }
+  const findata = await loadFinancials();
+  const stocks = [];
+  for (const c of compareCodes) {
+    try {
+      const s = await api.get("/stocks/" + encodeURIComponent(c));
+      s._fin = findata.stocks[c] || { a: [], q: [] };
+      stocks.push(s);
+    } catch (e) { /* 除外 */ }
+  }
+  if (!stocks.length) {
+    body.innerHTML = '<div class="empty">銘柄情報を取得できませんでした</div>';
+    return;
+  }
+
+  const lastA = (s) => { const a = s._fin.a || []; return a[a.length - 1] || null; };
+  const prevA = (s) => { const a = s._fin.a || []; return a[a.length - 2] || null; };
+  const cell = (fn, cls) => stocks.map((s) => {
+    const v = fn(s);
+    return `<td class="${typeof cls === "function" ? cls(s) : (cls || "")}">${v}</td>`;
+  }).join("");
+  const yoyCell = (idx) => stocks.map((s) => {
+    const l = lastA(s), p = prevA(s);
+    const v = yoyPct(l && l[idx], p && p[idx]);
+    if (v == null) return "<td>-</td>";
+    return `<td class="${v >= 0 ? "pos" : "neg"}">${v >= 0 ? "+" : ""}${v.toFixed(1)}%</td>`;
+  }).join("");
+  const nextSched = (s) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const n = (s.schedules || []).find((x) => x.announce_date >= today);
+    return n ? `${fmtDate(n.announce_date)} ${h(n.fiscal_type || "")}` : "-";
+  };
+
+  const metricRows = `
+    <tr><td class="metric-name">市場 / 業種</td>${cell((s) => `${h(s.market || "-")} / ${h(s.sector || "-")}`)}</tr>
+    <tr><td class="metric-name">時価総額</td>${cell((s) => h(s.market_cap_label || "-"))}</tr>
+    <tr><td class="metric-name">直近通期 (期末)</td>${cell((s) => { const l = lastA(s); return l ? h(l[0]) : "-"; })}</tr>
+    <tr><td class="metric-name">売上高</td>${cell((s) => { const l = lastA(s); return fmtMoney(l && l[1]); })}</tr>
+    <tr><td class="metric-name">売上高 前期比</td>${yoyCell(1)}</tr>
+    <tr><td class="metric-name">営業利益</td>${cell((s) => { const l = lastA(s); return fmtMoney(l && l[2]); })}</tr>
+    <tr><td class="metric-name">営業利益 前期比</td>${yoyCell(2)}</tr>
+    <tr><td class="metric-name">営業利益率</td>${cell((s) => { const l = lastA(s); return fmtPct(l && l[1] && l[2] != null ? (l[2] / l[1]) * 100 : null); })}</tr>
+    <tr><td class="metric-name">純利益</td>${cell((s) => { const l = lastA(s); return fmtMoney(l && l[3]); })}</tr>
+    <tr><td class="metric-name">EPS</td>${cell((s) => { const l = lastA(s); return l && l[4] != null ? l[4].toFixed(1) + "円" : "-"; })}</tr>
+    <tr><td class="metric-name">次回決算予定</td>${cell(nextSched)}</tr>
+    <tr><td class="metric-name">分析コメント</td>${cell((s) => {
+      const c = analysisState.comments[s.code];
+      return c ? h(c.slice(0, 60)) + (c.length > 60 ? "…" : "") : '<span style="color:var(--text-dim)">-</span>';
+    })}</tr>`;
+
+  // 推移チャート (年次): 全銘柄の期をマージした軸に揃える
+  const allPeriods = [...new Set(stocks.flatMap((s) => (s._fin.a || []).map((r) => r[0])))].sort();
+  const labels = allPeriods.map(periodLabel);
+  const seriesOf = (idx, pctOfRev) => stocks.map((s, i) => {
+    const byPeriod = new Map((s._fin.a || []).map((r) => [r[0], r]));
+    return {
+      name: `${s.code} ${s.name}`.slice(0, 16),
+      color: CHART_COLORS[i % CHART_COLORS.length],
+      type: "line",
+      values: allPeriods.map((p) => {
+        const r = byPeriod.get(p);
+        if (!r) return null;
+        if (pctOfRev) return r[1] && r[idx] != null ? (r[idx] / r[1]) * 100 : null;
+        return r[idx];
+      }),
+    };
+  });
+
+  body.innerHTML = `
+    <div class="table-wrap" style="margin-bottom:16px"><table>
+      <thead><tr><th class="no-sort"></th>${stocks.map((s) =>
+        `<th class="no-sort"><a class="link" href="#/analysis/${h(s.code)}">${h(s.code)} ${h(s.name)}</a></th>`).join("")}</tr></thead>
+      <tbody>${metricRows}</tbody>
+    </table></div>
+    <div class="charts-grid">
+      ${chartSVG({ title: "売上高の推移 (年次)", labels, series: seriesOf(1) })}
+      ${chartSVG({ title: "営業利益率の推移 (年次)", labels, unit: "pct", series: seriesOf(2, true) })}
+      ${chartSVG({ title: "営業利益の推移 (年次)", labels, series: seriesOf(2) })}
+      ${chartSVG({ title: "純利益の推移 (年次)", labels, series: seriesOf(3) })}
+    </div>
+    <div class="meta-line">出典: Yahoo Finance の年次財務データ。銘柄名リンクから個別の銘柄分析へ移動できます。</div>`;
+}
+
+// ---------------------------------------------------------------------------
 // 初期化
 // ---------------------------------------------------------------------------
 el("globalFetch").onclick = runFetch;
