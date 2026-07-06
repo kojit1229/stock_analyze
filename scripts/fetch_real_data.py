@@ -124,7 +124,7 @@ def fetch_stock_master():
 # 決算発表予定 (JPX)
 # ---------------------------------------------------------------------------
 def _excel_links(page_url):
-    html = http_get(page_url).text
+    html = http_get(page_url).content.decode("utf-8", "replace")
     links = re.findall(r'href="([^"]+?\.xlsx?)"', html, flags=re.IGNORECASE)
     seen, out = set(), []
     for l in links:
@@ -303,12 +303,68 @@ def fetch_disclosures(days=35, per_day_limit=3000):
 # ---------------------------------------------------------------------------
 # 時価総額 (JPX 統計、ベストエフォート)
 # ---------------------------------------------------------------------------
-def fetch_market_caps():
+def _parse_cap_file(content, label, debug=False):
+    """銘柄別時価総額 Excel から {code: 円} を抽出する。
+
+    JPX の Excel は「コード」と「時価総額」の見出しが別々の行にある
+    2段ヘッダー構成のことがあるため、見出しセルを行をまたいで探す。
+    """
     import pandas as pd
 
+    xls = pd.ExcelFile(io.BytesIO(content))
+    for sheet in xls.sheet_names:
+        raw = xls.parse(sheet, header=None, dtype=object)
+        n = min(len(raw), 25)
+        code_pos = cap_pos = None
+        for i in range(n):
+            for j, v in enumerate(raw.iloc[i].tolist()):
+                s = str(v)
+                if code_pos is None and "コード" in s:
+                    code_pos = (i, j)
+                if cap_pos is None and "時価総額" in s:
+                    cap_pos = (i, j)
+        if not code_pos or not cap_pos or abs(code_pos[0] - cap_pos[0]) > 3:
+            continue
+        header_idx = max(code_pos[0], cap_pos[0])
+        c_code, c_cap = code_pos[1], cap_pos[1]
+        values = {}
+        for i in range(header_idx + 1, len(raw)):
+            r = raw.iloc[i].tolist()
+            code = normalize_code(r[c_code] if c_code < len(r) else "")
+            if not code:
+                continue
+            try:
+                v = float(str(r[c_cap]).replace(",", ""))
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                values[code] = v
+        if len(values) > 1000:
+            # 単位 (円 or 百万円) をファイル全体の最大値から推定する。
+            # 最大の時価総額は数十兆円 = 数e13円 / 数e7百万円 のため、
+            # 最大値が 1e10 を超えていれば円単位とみなす。
+            vmax = max(values.values())
+            mult = 1 if vmax > 1e10 else 1_000_000
+            caps = {c: int(v * mult) for c, v in values.items()}
+            log(f"時価総額: {label} [{sheet}] から {len(caps)}件 (単位倍率 {mult})")
+            return caps
+        if debug and len(values) > 0:
+            log(f"  {label} [{sheet}]: 抽出 {len(values)}件のみ (閾値未満)")
+    if debug:
+        # 解析できなかった場合はレイアウトをログに残し、次回の改修に使う
+        for sheet in xls.sheet_names[:2]:
+            raw = xls.parse(sheet, header=None, dtype=object)
+            log(f"  {label} [{sheet}] 先頭行レイアウト:")
+            for i in range(min(len(raw), 6)):
+                cells = [str(v)[:14] for v in raw.iloc[i].tolist()[:9]]
+                log(f"    row{i}: {cells}")
+    return None
+
+
+def fetch_market_caps():
     for page in MARKET_CAP_PAGES:
         try:
-            html = http_get(page).text
+            html = http_get(page).content.decode("utf-8", "replace")
         except Exception as e:  # noqa: BLE001
             log(f"時価総額ページ取得失敗 {page}: {e}")
             continue
@@ -335,47 +391,16 @@ def fetch_market_caps():
         for line in debug_lines[:25]:
             log(line)
         for url in candidates[:4]:
+            label = url.rsplit("/", 1)[-1]
             try:
                 content = http_get(url).content
-                xls = pd.ExcelFile(io.BytesIO(content))
-                for sheet in xls.sheet_names:
-                    raw = xls.parse(sheet, header=None, dtype=object)
-                    header_idx, c_code, c_cap = None, None, None
-                    for i in range(min(len(raw), 15)):
-                        vals = [str(v) for v in raw.iloc[i].tolist()]
-                        if any("コード" in v for v in vals) and any("時価総額" in v for v in vals):
-                            header_idx = i
-                            for j, v in enumerate(vals):
-                                if "コード" in v and c_code is None:
-                                    c_code = j
-                                if "時価総額" in v and c_cap is None:
-                                    c_cap = j
-                            break
-                    if header_idx is None:
-                        continue
-                    values = {}
-                    for i in range(header_idx + 1, len(raw)):
-                        r = raw.iloc[i].tolist()
-                        code = normalize_code(r[c_code] if c_code < len(r) else "")
-                        if not code:
-                            continue
-                        try:
-                            v = float(str(r[c_cap]).replace(",", ""))
-                        except (TypeError, ValueError):
-                            continue
-                        if v > 0:
-                            values[code] = v
-                    if len(values) > 1000:
-                        # 単位 (円 or 百万円) をファイル全体の最大値から推定する。
-                        # 最大の時価総額は数十兆円 = 数e13円 / 数e7百万円 のため、
-                        # 最大値が 1e10 を超えていれば円単位とみなす。
-                        vmax = max(values.values())
-                        mult = 1 if vmax > 1e10 else 1_000_000
-                        caps = {c: int(v * mult) for c, v in values.items()}
-                        log(f"時価総額: {url.rsplit('/', 1)[-1]} から {len(caps)}件 (単位倍率 {mult})")
-                        return caps
+                # 「jika(時価)」を含むファイルは本命なので、失敗時に
+                # レイアウトをログへ出力して次回の改修に役立てる
+                caps = _parse_cap_file(content, label, debug=("jika" in label.lower()))
+                if caps:
+                    return caps
             except Exception as e:  # noqa: BLE001
-                log(f"  {url}: 解析失敗 ({e})")
+                log(f"  {label}: 解析失敗 ({type(e).__name__}: {e})")
     log("時価総額: 取得できず (null のままにします)")
     return {}
 
