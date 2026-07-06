@@ -1,0 +1,43 @@
+name: Probe external APIs (診断用)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe yanoshin direct (6506, timing)
+        continue-on-error: true
+        run: |
+          echo "=== direct yanoshin 6506 (limit=150) ==="
+          time curl -s -o /tmp/direct.json -w "status=%{http_code} size=%{size_download} time=%{time_total}s\n" \
+            --max-time 90 "https://webapi.yanoshin.jp/webapi/tdnet/list/6506.json?limit=150" || echo "FAILED"
+          head -c 200 /tmp/direct.json; echo
+      - name: Probe corsproxy.io with github.io Origin
+        continue-on-error: true
+        run: |
+          echo "=== corsproxy.io (Origin: github.io) ==="
+          time curl -s -o /tmp/cp.json -D /tmp/cp_headers.txt -w "status=%{http_code} size=%{size_download} time=%{time_total}s\n" \
+            --max-time 90 -H "Origin: https://kojit1229.github.io" \
+            "https://corsproxy.io/?url=https%3A%2F%2Fwebapi.yanoshin.jp%2Fwebapi%2Ftdnet%2Flist%2F6506.json%3Flimit%3D150" || echo "FAILED"
+          echo "--- response headers ---"; cat /tmp/cp_headers.txt | head -15
+          echo "--- body head ---"; head -c 300 /tmp/cp.json; echo
+      - name: Probe allorigins with github.io Origin
+        continue-on-error: true
+        run: |
+          echo "=== api.allorigins.win/raw (Origin: github.io) ==="
+          time curl -s -o /tmp/ao.json -D /tmp/ao_headers.txt -w "status=%{http_code} size=%{size_download} time=%{time_total}s\n" \
+            --max-time 120 -H "Origin: https://kojit1229.github.io" \
+            "https://api.allorigins.win/raw?url=https%3A%2F%2Fwebapi.yanoshin.jp%2Fwebapi%2Ftdnet%2Flist%2F6506.json%3Flimit%3D150" || echo "FAILED"
+          echo "--- response headers ---"; cat /tmp/ao_headers.txt | head -15
+          echo "--- body head ---"; head -c 300 /tmp/ao.json; echo
+      - name: Probe jsdelivr-style alternates
+        continue-on-error: true
+        run: |
+          echo "=== cors.eu.org ==="
+          time curl -s -o /tmp/eu.json -D /tmp/eu_h.txt -w "status=%{http_code} size=%{size_download} time=%{time_total}s\n" \
+            --max-time 60 -H "Origin: https://kojit1229.github.io" \
+            "https://cors.eu.org/https://webapi.yanoshin.jp/webapi/tdnet/list/6506.json?limit=150" || echo "FAILED"
+          grep -i "access-control" /tmp/eu_h.txt || echo "(no ACAO)"
+          head -c 200 /tmp/eu.json; echo
