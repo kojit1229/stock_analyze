@@ -53,8 +53,8 @@ def jst_now():
     return datetime.datetime.utcnow() + datetime.timedelta(hours=9)
 
 
-def http_get(url, **kw):
-    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT, **kw)
+def http_get(url, timeout=TIMEOUT, **kw):
+    r = requests.get(url, headers=HEADERS, timeout=timeout, **kw)
     r.raise_for_status()
     return r
 
@@ -255,7 +255,7 @@ def fetch_disclosures(days=35, per_day_limit=3000):
         items = None
         for attempt in (1, 2):
             try:
-                items = http_get(url, params={"limit": per_day_limit}).json().get("items", [])
+                items = http_get(url, params={"limit": per_day_limit}, timeout=45).json().get("items", [])
                 break
             except Exception as e:  # noqa: BLE001
                 log(f"  {ds}: 取得失敗 (試行{attempt}) {type(e).__name__}: {e}")
@@ -315,6 +315,7 @@ def fetch_market_caps():
         # ページ内の Excel リンクのうち、アンカーテキストまたは直前の文脈
         # (表の行見出し等) に「時価総額」を含むものを候補にする
         candidates = []
+        fallbacks = []
         debug_lines = []
         for m in re.finditer(r'<a[^>]+href="([^"]+?\.xlsx?)"[^>]*>(.*?)</a>', html,
                              flags=re.IGNORECASE | re.DOTALL):
@@ -323,8 +324,13 @@ def fetch_market_caps():
             context = re.sub(r"\s+", " ", context)[-120:]
             debug_lines.append(f"    [{text[:30]}] {href.rsplit('/', 1)[-1]} ctx=...{context[-60:]}")
             hay = text + " " + context + " " + href
+            full = urllib.parse.urljoin(page, href)
             if "時価総額" in hay or "jikasougaku" in hay.lower():
-                candidates.append(urllib.parse.urljoin(page, href))
+                candidates.append(full)
+            elif re.search(r"historical|souba|month", href, flags=re.IGNORECASE):
+                # 月間相場表 (銘柄別の月末時価総額を含む場合がある) も解析を試す
+                fallbacks.append(full)
+        candidates.extend(fallbacks[:2])
         log(f"{page}: Excelリンク{len(debug_lines)}件 / 時価総額候補 {len(candidates)}件")
         for line in debug_lines[:25]:
             log(line)
@@ -347,7 +353,7 @@ def fetch_market_caps():
                             break
                     if header_idx is None:
                         continue
-                    caps = {}
+                    values = {}
                     for i in range(header_idx + 1, len(raw)):
                         r = raw.iloc[i].tolist()
                         code = normalize_code(r[c_code] if c_code < len(r) else "")
@@ -357,11 +363,16 @@ def fetch_market_caps():
                             v = float(str(r[c_cap]).replace(",", ""))
                         except (TypeError, ValueError):
                             continue
-                        # JPX の統計は百万円単位が通例。桁から単位を推定する。
-                        yen = v * 1_000_000 if v < 1e12 else v
-                        caps[code] = int(yen)
-                    if len(caps) > 1000:
-                        log(f"時価総額: {url.rsplit('/', 1)[-1]} から {len(caps)}件")
+                        if v > 0:
+                            values[code] = v
+                    if len(values) > 1000:
+                        # 単位 (円 or 百万円) をファイル全体の最大値から推定する。
+                        # 最大の時価総額は数十兆円 = 数e13円 / 数e7百万円 のため、
+                        # 最大値が 1e10 を超えていれば円単位とみなす。
+                        vmax = max(values.values())
+                        mult = 1 if vmax > 1e10 else 1_000_000
+                        caps = {c: int(v * mult) for c, v in values.items()}
+                        log(f"時価総額: {url.rsplit('/', 1)[-1]} から {len(caps)}件 (単位倍率 {mult})")
                         return caps
             except Exception as e:  # noqa: BLE001
                 log(f"  {url}: 解析失敗 ({e})")
@@ -381,7 +392,9 @@ def write_json(path, payload):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="frontend/data")
-    parser.add_argument("--days", type=int, default=35, help="開示の取得日数")
+    parser.add_argument("--days", type=int, default=7,
+                        help="開示の取得日数 (既存データとマージするため通常は直近数日で足りる)")
+    parser.add_argument("--keep-days", type=int, default=45, help="開示の保持日数")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -407,12 +420,28 @@ def main():
     except Exception as e:  # noqa: BLE001
         log(f"決算発表予定の取得でエラー: {e}")
 
-    # 4) 決算短信ほか開示
-    disclosures = []
+    # 4) 決算短信ほか開示 (直近 days 日分を取得し、既存データとマージする。
+    #    取得に失敗した日があっても、過去の実行で取得済みのデータは残る)
+    fetched_discs = []
     try:
-        disclosures = [d for d in fetch_disclosures(days=args.days) if d["code"] in stocks]
+        fetched_discs = [d for d in fetch_disclosures(days=args.days) if d["code"] in stocks]
     except Exception as e:  # noqa: BLE001
         log(f"開示の取得でエラー: {e}")
+
+    existing_discs = []
+    disc_path = os.path.join(args.out, "disclosures.json")
+    try:
+        with open(disc_path, encoding="utf-8") as f:
+            existing_discs = json.load(f)
+    except (OSError, ValueError):
+        pass
+    merged = {d["key"]: d for d in existing_discs if d.get("key")}
+    for d in fetched_discs:
+        merged[d["key"]] = d
+    cutoff = (jst_now() - datetime.timedelta(days=args.keep_days)).strftime("%Y-%m-%dT00:00:00")
+    disclosures = [d for d in merged.values() if (d.get("published_at") or "") >= cutoff]
+    disclosures.sort(key=lambda x: x["published_at"] or "", reverse=True)
+    log(f"開示マージ: 新規{len(fetched_discs)}件 + 既存{len(existing_discs)}件 → {len(disclosures)}件")
 
     # 書き出し (空データでの上書きはしない)
     write_json(os.path.join(args.out, "stocks.json"), sorted(stocks.values(), key=lambda s: s["code"]))
@@ -421,7 +450,7 @@ def main():
     else:
         log("決算発表予定が空のため schedule.json は更新しません")
     if disclosures:
-        write_json(os.path.join(args.out, "disclosures.json"), disclosures)
+        write_json(disc_path, disclosures)
     else:
         log("開示が空のため disclosures.json は更新しません")
 
