@@ -18,3 +18,5 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Smoke test server boot & API
         run: python scripts/smoke.py
+      - name: Check static (GitHub Pages) local API
+        run: node scripts/check_local_api.mjs

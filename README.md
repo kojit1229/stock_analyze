@@ -4,10 +4,19 @@
 
 [要件定義](docs/requirements.md) に基づき、MVPスコープ（決算日程一覧・時価総額での絞り込み・マイ銘柄登録・決算短信の自動取得と閲覧）を実装しています。
 
+## 🌐 GitHub Pages で今すぐ試す
+
+**https://kojit1229.github.io/stock_analyze/**
+
+サーバ不要の**静的デモモード**で全機能（決算予定の絞り込み・マイ銘柄登録・決算短信の取得・PDF閲覧）が動作します。データはブラウザの localStorage に保存され、PDF はブラウザ内で生成されます。`main` へのpushで [GitHub Actions](.github/workflows/pages.yml) が自動デプロイします。
+
+> 初回は Actions の「Deploy to GitHub Pages」ワークフローが一度成功する必要があります（Pages設定は workflow が自動で有効化します）。
+
 ## 特徴
 
 - **依存ライブラリゼロ** — Python 標準ライブラリ（`http.server` + `sqlite3`）のみで動作。`pip install` 不要。
 - **バニラJS SPA** — ビルド不要のフロントエンド。
+- **2つの動作モード** — Pythonサーバモード（SQLite永続化）と静的デモモード（GitHub Pages / localStorage）。`/api/*` が見つからない環境では自動で静的モードにフォールバック。
 - 4つの主要画面 + 銘柄詳細 + 決算短信詳細（PDFビューア）。
 
 ## 動作環境
@@ -54,8 +63,10 @@ kessan/
   server.py             HTTPサーバ・ルーティング・静的配信
 frontend/
   index.html / app.js / styles.css   バニラJS SPA
+  local-api.js          静的モード用のブラウザ内API (GitHub Pages 用)
 tests/test_api.py       統合テスト（サーバを起動して検証）
 scripts/smoke.py        起動スモークテスト
+scripts/check_local_api.mjs  静的モードの回帰チェック (Node)
 ```
 
 ### データモデル（要件6）
@@ -89,6 +100,7 @@ scripts/smoke.py        起動スモークテスト
 ```bash
 python -m unittest discover -s tests -v   # 統合テスト（31ケース）
 python scripts/smoke.py                   # 起動スモークテスト
+node scripts/check_local_api.mjs          # 静的モードの回帰チェック
 ```
 
 ## MVPで満たす受け入れ条件（要件11）
