@@ -1,0 +1,42 @@
+name: Update market data
+
+on:
+  schedule:
+    # JST 9:05 / 12:05 / 15:35 / 18:05 / 21:05 (平日) — 決算発表が集中する
+    # 引け後の時間帯を含め1日複数回更新する (要件9.2)
+    - cron: '5 0,3,9,12 * * 1-5'
+    - cron: '35 6 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install requests pandas xlrd openpyxl
+      - name: Fetch real data (JPX / TDnet)
+        run: python scripts/fetch_real_data.py --out frontend/data
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add frontend/data
+          if git diff --cached --quiet; then
+            echo "変更なし"
+          else
+            git commit -m "データ更新: 決算予定・決算短信 (自動)"
+            git push origin main
+          fi

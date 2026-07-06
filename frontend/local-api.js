@@ -3,10 +3,15 @@
  *
  * GitHub Pages などサーバなしの静的ホスティングで全機能を動かすための、
  * バックエンド (kessan/) と同等のロジックのブラウザ内実装。
- * - 銘柄・決算予定: kessan/seed.py と同じサンプルデータを毎回生成
- * - マイ銘柄・決算短信: localStorage に永続化
- * - PDF: kessan/pdfgen.py と同じ最小PDFをその場で生成し Blob URL で表示
  *
+ * 2つのデータモードを持つ:
+ * - real:   frontend/data/*.json (GitHub Actions が JPX / TDnet から定期取得し
+ *           コミットした実データ) を読み込む。決算短信PDFは TDnet の実URLを開く。
+ *           閲覧済みフラグ・コメントは localStorage のオーバーレイに保存する。
+ * - sample: data/*.json が無い場合のフォールバック。サンプル銘柄とブラウザ内
+ *           生成PDFで動作する (従来どおり)。
+ *
+ * マイ銘柄は両モード共通で localStorage に永続化する。
  * app.js は通常 /api/* へ fetch し、失敗した場合のみここへフォールバックする。
  * (Node でのテスト用に window が無い環境では globalThis に取り付ける)
  */
@@ -40,33 +45,33 @@
   }
 
   // -------------------------------------------------------------------------
-  // サンプルデータ (kessan/seed.py と同一)
+  // サンプルデータ (kessan/seed.py と同一) — real データが無いときのフォールバック
   // -------------------------------------------------------------------------
-  const STOCKS = [
-    ["7203", "トヨタ自動車", "プライム", "輸送用機器", 40e12, "内国株式"],
-    ["6758", "ソニーグループ", "プライム", "電気機器", 18e12, "内国株式"],
-    ["9984", "ソフトバンクグループ", "プライム", "情報・通信業", 13e12, "内国株式"],
-    ["6861", "キーエンス", "プライム", "電気機器", 15e12, "内国株式"],
-    ["9432", "日本電信電話", "プライム", "情報・通信業", 14e12, "内国株式"],
-    ["8035", "東京エレクトロン", "プライム", "電気機器", 13e12, "内国株式"],
-    ["6098", "リクルートホールディングス", "プライム", "サービス業", 12e12, "内国株式"],
-    ["4063", "信越化学工業", "プライム", "化学", 11e12, "内国株式"],
-    ["3382", "セブン&アイ・ホールディングス", "プライム", "小売業", 5e12, "内国株式"],
-    ["7532", "パン・パシフィック・インターナショナルホールディングス", "プライム", "小売業", 2.5e12, "内国株式"],
-    ["3092", "ZOZO", "プライム", "小売業", 1.1e12, "内国株式"],
-    ["3697", "SHIFT", "プライム", "情報・通信業", 320e9, "内国株式"],
-    ["4385", "メルカリ", "プライム", "情報・通信業", 380e9, "内国株式"],
-    ["6027", "弁護士ドットコム", "グロース", "情報・通信業", 55e9, "内国株式"],
-    ["4485", "JTOWER", "グロース", "情報・通信業", 62e9, "内国株式"],
-    ["2158", "FRONTEO", "グロース", "情報・通信業", 21e9, "内国株式"],
-    ["3853", "アステリア", "スタンダード", "情報・通信業", 8.5e9, "内国株式"],
-    ["7351", "グッドパッチ", "グロース", "サービス業", 7e9, "内国株式"],
-    ["4382", "ＨＥＲＯＺ", "グロース", "情報・通信業", 14e9, "内国株式"],
-    ["2412", "ベネフィット・ワン", "プライム", "サービス業", 240e9, "内国株式"],
-    ["6501", "日立製作所", "プライム", "電気機器", 16e12, "内国株式"],
-    ["8306", "三菱ＵＦＪフィナンシャル・グループ", "プライム", "銀行業", 20e12, "内国株式"],
-    ["4661", "オリエンタルランド", "プライム", "サービス業", 6e12, "内国株式"],
-    ["6178", "日本郵政", "プライム", "サービス業", 480e9, "内国株式"],
+  const SAMPLE_STOCKS = [
+    ["7203", "トヨタ自動車", "プライム", "輸送用機器", 40e12],
+    ["6758", "ソニーグループ", "プライム", "電気機器", 18e12],
+    ["9984", "ソフトバンクグループ", "プライム", "情報・通信業", 13e12],
+    ["6861", "キーエンス", "プライム", "電気機器", 15e12],
+    ["9432", "日本電信電話", "プライム", "情報・通信業", 14e12],
+    ["8035", "東京エレクトロン", "プライム", "電気機器", 13e12],
+    ["6098", "リクルートホールディングス", "プライム", "サービス業", 12e12],
+    ["4063", "信越化学工業", "プライム", "化学", 11e12],
+    ["3382", "セブン&アイ・ホールディングス", "プライム", "小売業", 5e12],
+    ["7532", "パン・パシフィック・インターナショナルホールディングス", "プライム", "小売業", 2.5e12],
+    ["3092", "ZOZO", "プライム", "小売業", 1.1e12],
+    ["3697", "SHIFT", "プライム", "情報・通信業", 320e9],
+    ["4385", "メルカリ", "プライム", "情報・通信業", 380e9],
+    ["6027", "弁護士ドットコム", "グロース", "情報・通信業", 55e9],
+    ["4485", "JTOWER", "グロース", "情報・通信業", 62e9],
+    ["2158", "FRONTEO", "グロース", "情報・通信業", 21e9],
+    ["3853", "アステリア", "スタンダード", "情報・通信業", 8.5e9],
+    ["7351", "グッドパッチ", "グロース", "サービス業", 7e9],
+    ["4382", "ＨＥＲＯＺ", "グロース", "情報・通信業", 14e9],
+    ["2412", "ベネフィット・ワン", "プライム", "サービス業", 240e9],
+    ["6501", "日立製作所", "プライム", "電気機器", 16e12],
+    ["8306", "三菱ＵＦＪフィナンシャル・グループ", "プライム", "銀行業", 20e12],
+    ["4661", "オリエンタルランド", "プライム", "サービス業", 6e12],
+    ["6178", "日本郵政", "プライム", "サービス業", 480e9],
   ];
   const FISCAL_TYPES = ["本決算", "第1四半期", "第2四半期", "第3四半期"];
   const ANNOUNCE_TIMES = ["引け後", "寄付前", "15:00", "未定"];
@@ -106,9 +111,11 @@
   }
 
   // -------------------------------------------------------------------------
-  // 状態 (localStorage 永続化。使えない環境ではメモリ内フォールバック)
+  // 永続化 (localStorage。使えない環境ではメモリ内フォールバック)
   // -------------------------------------------------------------------------
-  const STORE_KEY = "kessan_local_v1";
+  const STORE_KEY = "kessan_local_v1";     // マイ銘柄 + サンプルモードの取得済み短信
+  const OVERLAY_KEY = "kessan_overlay_v1"; // 実データ短信の閲覧済み/コメント
+  const SEEN_KEY = "kessan_seen_v1";       // 実データ短信の既知キー (新着判定用)
   const storage = (() => {
     try {
       const t = "__kessan_probe__";
@@ -125,39 +132,124 @@
     }
   })();
 
-  function loadState() {
+  function loadJSON(key, fallback) {
     try {
-      const raw = storage.getItem(STORE_KEY);
-      if (raw) {
-        const s = JSON.parse(raw);
-        if (s && Array.isArray(s.mystocks) && Array.isArray(s.disclosures)) return s;
-      }
+      const raw = storage.getItem(key);
+      if (raw) return JSON.parse(raw);
     } catch (e) { /* 壊れたデータは初期化 */ }
-    return { mystocks: [], disclosures: [], nextDiscId: 1 };
+    return fallback;
   }
-  function saveState() {
-    storage.setItem(STORE_KEY, JSON.stringify(state));
-  }
-  let state = loadState();
 
-  // ロード時に決算予定を生成 (seed.py と同様、今日を基準に相対配置)
-  const LOAD_TIME = nowISO();
-  const stocksByCode = new Map(STOCKS.map((s) => [s[0], {
-    code: s[0], name: s[1], market: s[2], sector: s[3], market_cap: s[4],
-    listing_type: s[5], updated_at: LOAD_TIME,
-  }]));
-  const SCHEDULE = STOCKS.map((s, i) => ({
-    schedule_id: i + 1,
-    code: s[0],
-    announce_date: addDaysISO(todayISO(), OFFSETS[i]),
-    fiscal_type: FISCAL_TYPES[i % FISCAL_TYPES.length],
-    announce_time: ANNOUNCE_TIMES[i % ANNOUNCE_TIMES.length],
-    source: "サンプルデータ",
-    updated_at: LOAD_TIME,
-  }));
+  let state = loadJSON(STORE_KEY, null);
+  if (!state || !Array.isArray(state.mystocks) || !Array.isArray(state.disclosures)) {
+    state = { mystocks: [], disclosures: [], nextDiscId: 1 };
+  }
+  let overlay = loadJSON(OVERLAY_KEY, {});
+  let seenKeys = new Set(loadJSON(SEEN_KEY, []));
+
+  function saveState() { storage.setItem(STORE_KEY, JSON.stringify(state)); }
+  function saveOverlay() { storage.setItem(OVERLAY_KEY, JSON.stringify(overlay)); }
+  function saveSeen() { storage.setItem(SEEN_KEY, JSON.stringify([...seenKeys].slice(-20000))); }
 
   // -------------------------------------------------------------------------
-  // 最小PDFジェネレータ (kessan/pdfgen.py の移植)
+  // データモード管理
+  // -------------------------------------------------------------------------
+  let mode = "sample";           // "sample" | "real"
+  let META = null;               // real モードの meta.json
+  let stocksByCode = new Map();  // code -> {code,name,market,sector,market_cap}
+  let SCHEDULE = [];             // {schedule_id, code, announce_date, fiscal_type, announce_time, updated_at}
+  let REAL_DISCS = [];           // real モードの開示一覧 (オーバーレイ適用前)
+  let loadTime = nowISO();
+
+  function installSampleData() {
+    mode = "sample";
+    stocksByCode = new Map(SAMPLE_STOCKS.map((s) => [s[0], {
+      code: s[0], name: s[1], market: s[2], sector: s[3], market_cap: s[4],
+    }]));
+    SCHEDULE = SAMPLE_STOCKS.map((s, i) => ({
+      schedule_id: i + 1,
+      code: s[0],
+      announce_date: addDaysISO(todayISO(), OFFSETS[i]),
+      fiscal_type: FISCAL_TYPES[i % FISCAL_TYPES.length],
+      announce_time: ANNOUNCE_TIMES[i % ANNOUNCE_TIMES.length],
+      updated_at: loadTime,
+    }));
+    REAL_DISCS = [];
+  }
+
+  function installRealData(data) {
+    META = data.meta || {};
+    stocksByCode = new Map((data.stocks || []).map((s) => [s.code, {
+      code: s.code, name: s.name, market: s.market || null,
+      sector: s.sector || null, market_cap: s.market_cap == null ? null : s.market_cap,
+    }]));
+    SCHEDULE = (data.schedule || [])
+      .filter((r) => stocksByCode.has(r.code))
+      .map((r, i) => ({
+        schedule_id: i + 1,
+        code: r.code,
+        announce_date: r.date,
+        fiscal_type: r.fiscal_type || null,
+        announce_time: r.time || null,
+        updated_at: META.generated_at || loadTime,
+      }));
+    REAL_DISCS = (data.disclosures || [])
+      .filter((d) => stocksByCode.has(d.code))
+      .map((d, i) => ({
+        id: i + 1,
+        key: String(d.key),
+        code: d.code,
+        title: d.title,
+        pdf_url: d.pdf_url || "",
+        pdf_path: null,
+        doc_type: d.doc_type || null,
+        published_at: d.published_at || null,
+        fetched_at: META.generated_at || loadTime,
+      }));
+    mode = "real";
+  }
+
+  installSampleData();
+
+  // data/*.json を読みに行く (ブラウザのみ、初回の handle() 時に一度だけ)
+  let readyPromise = null;
+  function ensureReady() {
+    if (!readyPromise) readyPromise = loadRealData().catch(() => {});
+    return readyPromise;
+  }
+  async function loadRealData() {
+    if (typeof window === "undefined" || typeof fetch !== "function") return;
+    const data = await fetchDataFiles();
+    if (data) installRealData(data);
+  }
+  async function fetchDataFiles() {
+    const bust = "?v=" + Date.now();
+    async function getJson(name, required) {
+      try {
+        const res = await fetch("data/" + name + bust, { cache: "no-cache" });
+        if (!res.ok) throw new Error(String(res.status));
+        return await res.json();
+      } catch (e) {
+        if (required) throw e;
+        return null;
+      }
+    }
+    try {
+      const meta = await getJson("meta.json", true);
+      const [stocks, schedule, disclosures] = await Promise.all([
+        getJson("stocks.json", true),
+        getJson("schedule.json", false),
+        getJson("disclosures.json", false),
+      ]);
+      if (!Array.isArray(stocks) || !stocks.length) return null;
+      return { meta, stocks, schedule: schedule || [], disclosures: disclosures || [] };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 最小PDFジェネレータ (kessan/pdfgen.py の移植。sample モードのみ使用)
   // -------------------------------------------------------------------------
   function escPdf(t) {
     return String(t).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
@@ -219,7 +311,6 @@
   }
 
   function disclosurePdfBytes(d) {
-    const stock = stocksByCode.get(d.code) || { name: d.code };
     const f = figures(d.code);
     const lines = [
       `Kessan Tanshin (Financial Summary) - ${d.code}`,
@@ -249,8 +340,20 @@
   function registeredCodes() {
     return new Set(state.mystocks.map((m) => m.code));
   }
+
+  // 現在アクティブな開示一覧 (オーバーレイ適用済み) を返す
+  function activeDisclosures() {
+    if (mode !== "real") return state.disclosures.slice();
+    return REAL_DISCS.map((d) => {
+      const ov = overlay[d.key] || {};
+      return Object.assign({}, d, {
+        is_read: ov.is_read ? 1 : 0,
+        comment: ov.comment || "",
+      });
+    });
+  }
   function disclosureCountFor(code, date) {
-    return state.disclosures.filter(
+    return activeDisclosures().filter(
       (x) => x.code === code && (date == null || (x.published_at || "").slice(0, 10) === date)
     ).length;
   }
@@ -259,9 +362,13 @@
     return Object.assign({}, d, { name: s.name, market: s.market, sector: s.sector });
   }
   function lastUpdated() {
+    if (mode === "real") {
+      const g = (META && META.generated_at) || null;
+      return { schedule: g, disclosure: g };
+    }
     let disc = null;
     for (const x of state.disclosures) if (!disc || x.fetched_at > disc) disc = x.fetched_at;
-    return { schedule: LOAD_TIME, disclosure: disc };
+    return { schedule: loadTime, disclosure: disc };
   }
   function apiError(msg) {
     return new Error(msg);
@@ -275,11 +382,12 @@
     let [start, end] = dateRangeBounds(q.date_range || "all");
     let items = SCHEDULE.filter((es) => {
       const s = stocksByCode.get(es.code);
+      if (!s) return false;
       if (start && es.announce_date < start) return false;
       if (end && es.announce_date > end) return false;
       if (q.date && es.announce_date !== q.date) return false;
       if (q.code && !es.code.includes(q.code)) return false;
-      if (q.name && !s.name.includes(q.name)) return false;
+      if (q.name && !(s.name || "").includes(q.name)) return false;
       if (q.sector && s.sector !== q.sector) return false;
       if (q.market && s.market !== q.market) return false;
       // 時価総額: 任意レンジ優先、なければプリセット
@@ -290,17 +398,23 @@
         const r = RANGES.find((x) => x.key === q.cap_range);
         if (r) { lo = r.min; hi = r.max; }
       }
-      if (lo !== null && s.market_cap < lo) return false;
-      if (hi !== null && s.market_cap >= hi) return false;
+      if (lo !== null && (s.market_cap == null || s.market_cap < lo)) return false;
+      if (hi !== null && (s.market_cap == null || s.market_cap >= hi)) return false;
       return true;
     });
 
     const sortKey = { date: "announce_date", cap: "market_cap", code: "code", name: "name" }[q.sort] || "announce_date";
     const dir = (q.order || "asc").toLowerCase() === "desc" ? -1 : 1;
     const reg = registeredCodes();
+    const discs = activeDisclosures();
+    const discIndex = new Map(); // code|date -> count
+    for (const d of discs) {
+      const k = d.code + "|" + (d.published_at || "").slice(0, 10);
+      discIndex.set(k, (discIndex.get(k) || 0) + 1);
+    }
     const rows = items.map((es) => {
       const s = stocksByCode.get(es.code);
-      const cnt = disclosureCountFor(es.code, es.announce_date);
+      const cnt = discIndex.get(es.code + "|" + es.announce_date) || 0;
       return enrich({
         schedule_id: es.schedule_id, code: es.code, name: s.name, market: s.market,
         sector: s.sector, market_cap: s.market_cap,
@@ -313,6 +427,10 @@
     });
     rows.sort((a, b) => {
       const av = a[sortKey], bv = b[sortKey];
+      const an = av == null, bn = bv == null;
+      if (an && bn) return a.code < b.code ? -1 : 1;
+      if (an) return 1;      // 値なしは末尾へ
+      if (bn) return -1;
       if (av < bv) return -dir;
       if (av > bv) return dir;
       return a.code < b.code ? -1 : a.code > b.code ? 1 : 0;
@@ -326,8 +444,8 @@
     const detail = enrich(Object.assign({}, s));
     detail.schedules = SCHEDULE.filter((es) => es.code === code)
       .slice().sort((a, b) => (a.announce_date < b.announce_date ? -1 : 1));
-    detail.disclosures = state.disclosures.filter((x) => x.code === code)
-      .slice().sort((a, b) => (a.published_at > b.published_at ? -1 : 1));
+    detail.disclosures = activeDisclosures().filter((x) => x.code === code)
+      .sort((a, b) => ((a.published_at || "") > (b.published_at || "") ? -1 : 1));
     const reg = state.mystocks.find((m) => m.code === code) || null;
     detail.registration = reg ? Object.assign({}, reg) : null;
     detail.is_registered = !!reg;
@@ -336,21 +454,22 @@
 
   function listMyStocks() {
     const today = todayISO();
+    const discs = activeDisclosures();
     const rows = state.mystocks.slice()
       .sort((a, b) => (b.importance - a.importance) || (a.registered_at < b.registered_at ? -1 : 1))
       .map((m) => {
-        const s = stocksByCode.get(m.code) || {};
+        const s = stocksByCode.get(m.code) || { code: m.code, name: m.code };
         const next = SCHEDULE.filter((es) => es.code === m.code && es.announce_date >= today)
           .sort((a, b) => (a.announce_date < b.announce_date ? -1 : 1))[0];
-        const cnt = disclosureCountFor(m.code, null);
-        const unread = state.disclosures.filter((x) => x.code === m.code && !x.is_read).length;
+        const mine = discs.filter((x) => x.code === m.code);
+        const unread = mine.filter((x) => !x.is_read).length;
         return enrich(Object.assign({}, m, {
           name: s.name, market: s.market, sector: s.sector, market_cap: s.market_cap,
           next_announce_date: next ? next.announce_date : null,
           next_fiscal_type: next ? next.fiscal_type : null,
-          disclosure_count: cnt,
+          disclosure_count: mine.length,
           unread_count: unread,
-          fetch_status: cnt ? "取得済み" : "未取得",
+          fetch_status: mine.length ? "取得済み" : "未取得",
         }));
       });
     return { count: rows.length, items: rows };
@@ -401,22 +520,45 @@
 
   function listDisclosures(q) {
     q = q || {};
-    let rows = state.disclosures.slice();
+    let rows = activeDisclosures();
     if (q.code) rows = rows.filter((x) => x.code === q.code);
+    if (q.mine === "1" || q.mine === "true" || q.mine === true) {
+      const reg = registeredCodes();
+      rows = rows.filter((x) => reg.has(x.code));
+    }
     if (q.unread === "1" || q.unread === "true" || q.unread === true) rows = rows.filter((x) => !x.is_read);
     if (q.doc_type) rows = rows.filter((x) => x.doc_type === q.doc_type);
-    rows.sort((a, b) => (a.fetched_at > b.fetched_at ? -1 : a.fetched_at < b.fetched_at ? 1 : b.id - a.id));
+    rows.sort((a, b) => {
+      const ak = (a.published_at || a.fetched_at || ""), bk = (b.published_at || b.fetched_at || "");
+      return ak > bk ? -1 : ak < bk ? 1 : b.id - a.id;
+    });
+    if (rows.length > 500) rows = rows.slice(0, 500);
     return { count: rows.length, items: rows.map(joinStock) };
   }
 
+  function findDisclosure(id) {
+    const list = activeDisclosures();
+    return list.find((x) => x.id === Number(id)) || null;
+  }
+
   function getDisclosure(id) {
-    const d = state.disclosures.find((x) => x.id === Number(id));
+    const d = findDisclosure(id);
     if (!d) throw apiError("決算短信が見つかりません");
     const s = stocksByCode.get(d.code) || {};
     return Object.assign({}, joinStock(d), { market_cap: s.market_cap });
   }
 
   function updateDisclosure(id, body) {
+    if (mode === "real") {
+      const d = REAL_DISCS.find((x) => x.id === Number(id));
+      if (!d) throw apiError("決算短信が見つかりません");
+      const ov = overlay[d.key] || {};
+      if (body && "is_read" in body) ov.is_read = body.is_read ? 1 : 0;
+      if (body && "comment" in body) ov.comment = body.comment;
+      overlay[d.key] = ov;
+      saveOverlay();
+      return getDisclosure(id);
+    }
     const d = state.disclosures.find((x) => x.id === Number(id));
     if (!d) throw apiError("決算短信が見つかりません");
     if (body && "is_read" in body) d.is_read = body.is_read ? 1 : 0;
@@ -425,10 +567,36 @@
     return getDisclosure(id);
   }
 
-  // 決算短信の自動取得 (kessan/fetcher.py run_fetch と同等)
-  function runFetch() {
-    const today = todayISO();
+  // 決算短信の自動取得
+  // - real:   data/*.json を再読込し、登録銘柄の新着開示数を数える
+  // - sample: kessan/fetcher.py run_fetch と同等のシミュレーション
+  async function runFetch() {
     const now = nowISO();
+    if (mode === "real") {
+      const data = await fetchDataFiles();
+      if (data) installRealData(data);
+      const reg = registeredCodes();
+      let fetched = 0;
+      for (const d of REAL_DISCS) {
+        if (!reg.has(d.code)) continue;
+        if (!seenKeys.has(d.key)) {
+          seenKeys.add(d.key);
+          fetched++;
+        }
+      }
+      saveSeen();
+      for (const m of state.mystocks) m.last_checked_at = now;
+      saveState();
+      const when = (META && META.generated_at) ? META.generated_at.replace("T", " ") : "-";
+      return {
+        fetched,
+        message: fetched
+          ? `登録銘柄の決算短信 新着${fetched}件 (データ更新: ${when})`
+          : `新着なし (データ更新: ${when})`,
+      };
+    }
+
+    const today = todayISO();
     let fetched = 0;
     for (const m of state.mystocks) {
       const s = stocksByCode.get(m.code);
@@ -481,25 +649,32 @@
       .sort((a, b) => b.importance - a.importance)
       .slice(0, 5)
       .map((m) => {
-        const s = stocksByCode.get(m.code) || {};
+        const s = stocksByCode.get(m.code) || { name: m.code };
         return enrich({ code: m.code, name: s.name, importance: m.importance, market_cap: s.market_cap });
       });
+    // real モードでは「未確認/取得済み」は登録銘柄の開示に限定する
+    // (全上場企業の開示を対象にすると数千件になり意味を成さないため)
+    const discs = activeDisclosures().filter(
+      mode === "real" ? (d) => reg.has(d.code) : () => true
+    );
     return {
       date: today,
       todays_earnings: todays.items,
       todays_count: todays.count,
       registered_upcoming: upcoming,
-      unread_disclosures: state.disclosures.filter((x) => !x.is_read).length,
-      fetched_total: state.disclosures.length,
+      unread_disclosures: discs.filter((x) => !x.is_read).length,
+      fetched_total: discs.length,
       watchlist: watch,
       last_updated: lastUpdated(),
+      data_mode: mode,
     };
   }
 
   // -------------------------------------------------------------------------
   // ルーター (kessan/server.py ROUTES に対応)
   // -------------------------------------------------------------------------
-  function handle(method, pathWithQuery, body) {
+  async function handle(method, pathWithQuery, body) {
+    await ensureReady();
     const qi = pathWithQuery.indexOf("?");
     const path = qi >= 0 ? pathWithQuery.slice(0, qi) : pathWithQuery;
     const q = {};
@@ -509,12 +684,18 @@
     let m;
 
     if (method === "GET" && path === "/home") return homeSummary();
-    if (method === "GET" && path === "/meta") return { last_updated: lastUpdated(), version: "0.1.0-static" };
+    if (method === "GET" && path === "/meta") {
+      return { last_updated: lastUpdated(), version: "0.1.0-static", data_mode: mode };
+    }
     if (method === "GET" && path === "/sectors") {
-      return { sectors: [...new Set(STOCKS.map((s) => s[3]))].sort() };
+      const set = new Set();
+      for (const s of stocksByCode.values()) if (s.sector) set.add(s.sector);
+      return { sectors: [...set].sort() };
     }
     if (method === "GET" && path === "/markets") {
-      return { markets: [...new Set(STOCKS.map((s) => s[2]))].sort() };
+      const set = new Set();
+      for (const s of stocksByCode.values()) if (s.market) set.add(s.market);
+      return { markets: [...set].sort() };
     }
     if (method === "GET" && path === "/cap-ranges") {
       return { ranges: RANGES.map((r) => ({ key: r.key, label: r.label, min: r.min, max: r.max })) };
@@ -540,24 +721,49 @@
     throw apiError("not found: " + method + " " + path);
   }
 
-  // PDF を Blob URL として返す (iframe / ダウンロード用)
+  // PDF の URL を返す。
+  // - real:   TDnet の実 PDF URL (外部)
+  // - sample: ブラウザ内生成 PDF の Blob URL
   function pdfBlobUrl(id) {
+    if (mode === "real") {
+      const d = REAL_DISCS.find((x) => x.id === Number(id));
+      if (!d) throw apiError("決算短信が見つかりません");
+      return d.pdf_url || "";
+    }
     const bytes = pdfBytes(id);
     const blob = new Blob([bytes], { type: "application/pdf" });
     return URL.createObjectURL(blob);
   }
 
   function pdfBytes(id) {
+    if (mode === "real") throw apiError("実データモードではPDFは外部URLで提供されます");
     const d = state.disclosures.find((x) => x.id === Number(id));
     if (!d) throw apiError("決算短信が見つかりません");
     return disclosurePdfBytes(d);
   }
 
-  // テスト用: 状態リセット
+  // テスト用フック
   function _reset() {
     state = { mystocks: [], disclosures: [], nextDiscId: 1 };
+    overlay = {};
+    seenKeys = new Set();
     saveState();
+    saveOverlay();
+    saveSeen();
+  }
+  function _install(data) {
+    // 実データを直接インストールする (Node テスト / フィクスチャ用)
+    installRealData(data);
+    readyPromise = Promise.resolve();
+  }
+  function _installSample() {
+    installSampleData();
+    readyPromise = Promise.resolve();
   }
 
-  global.LocalApi = { handle, pdfBlobUrl, pdfBytes, _reset };
+  global.LocalApi = {
+    handle, pdfBlobUrl, pdfBytes,
+    mode: () => mode,
+    _reset, _install, _installSample,
+  };
 })(typeof window !== "undefined" ? window : globalThis);
