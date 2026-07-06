@@ -10,7 +10,11 @@ const api = {
   // 初回失敗時に自動でローカルモードへフォールバックする。
   local: false,
   async req(method, path, body) {
-    if (this.local && window.LocalApi) return window.LocalApi.handle(method, path, body);
+    if (this.local && window.LocalApi) {
+      const result = await window.LocalApi.handle(method, path, body);
+      markLocalMode();
+      return result;
+    }
     const opt = { method, headers: {} };
     if (body !== undefined) {
       opt.headers["Content-Type"] = "application/json";
@@ -34,8 +38,9 @@ const api = {
     } catch (e) {
       if (window.LocalApi && (e.fallback || e instanceof TypeError)) {
         this.local = true;
+        const result = await window.LocalApi.handle(method, path, body);
         markLocalMode();
-        return window.LocalApi.handle(method, path, body);
+        return result;
       }
       throw e;
     }
@@ -66,17 +71,28 @@ function toast(msg, isError) {
   setTimeout(() => (t.className = "toast"), 2600);
 }
 
-// 静的デモモード (GitHub Pages 等) のインジケータ
-let _localMarked = false;
+// 静的モード (GitHub Pages 等) のインジケータ。
+// LocalApi のデータモードに応じて「実データ」または「デモ」を表示する。
+let _localBadgeMode = null;
 function markLocalMode() {
-  if (_localMarked) return;
-  _localMarked = true;
-  const brand = document.querySelector(".brand-name");
-  if (brand) {
-    brand.insertAdjacentHTML(
-      "afterend",
-      '<span class="badge market" title="サーバなしで動作中。データはこのブラウザ(localStorage)に保存されます">デモ</span>'
-    );
+  const mode = window.LocalApi && window.LocalApi.mode ? window.LocalApi.mode() : "sample";
+  if (_localBadgeMode === mode) return;
+  _localBadgeMode = mode;
+  let badge = document.getElementById("localModeBadge");
+  if (!badge) {
+    const brand = document.querySelector(".brand-name");
+    if (!brand) return;
+    brand.insertAdjacentHTML("afterend", '<span class="badge market" id="localModeBadge"></span>');
+    badge = document.getElementById("localModeBadge");
+  }
+  if (mode === "real") {
+    badge.textContent = "実データ";
+    badge.title = "JPX・TDnetの公開データ (GitHub Actionsが定期取得)。マイ銘柄などはこのブラウザに保存されます";
+    badge.className = "badge ok";
+    badge.id = "localModeBadge";
+  } else {
+    badge.textContent = "デモ";
+    badge.title = "サーバなしで動作中。サンプルデータとブラウザ生成PDFを使用します";
   }
 }
 
@@ -301,7 +317,7 @@ async function loadSchedule() {
 
 function scheduleRow(s) {
   return `<tr>
-    <td>${fmtDate(s.announce_date)} <span class="badge market">${h(s.announce_time || "")}</span></td>
+    <td>${fmtDate(s.announce_date)}${s.announce_time ? ` <span class="badge market">${h(s.announce_time)}</span>` : ""}</td>
     <td class="code-cell"><a class="link" href="#/stock/${h(s.code)}">${h(s.code)}</a></td>
     <td>${h(s.name)} ${regBadge(s.is_registered)}</td>
     <td><span class="badge market">${h(s.market || "")}</span></td>
@@ -360,25 +376,31 @@ async function removeMyStock(code) {
 // ---------------------------------------------------------------------------
 // 決算短信一覧画面
 // ---------------------------------------------------------------------------
-const disclosureState = { unread: false, code: "" };
+const disclosureState = { filter: "all", code: "" }; // all | mine | unread
 
 route("disclosures", async (app, rest) => {
   if (rest && rest.length) return disclosureDetail(app, rest[0]);
-  const q = disclosureState.unread ? "?unread=1" : "";
+  const q = disclosureState.filter === "unread" ? "?unread=1"
+    : disclosureState.filter === "mine" ? "?mine=1" : "";
   const d = await api.get("/disclosures" + q);
+  const chip = (key, label) =>
+    `<span class="chip ${disclosureState.filter === key ? "active" : ""}" data-filter="${key}">${label}</span>`;
   app.innerHTML = `
     <div class="page-head"><h1>決算短信</h1><span class="sub">${d.count}件</span></div>
-    <div class="chips">
-      <span class="chip ${!disclosureState.unread ? "active" : ""}" id="chipAll">すべて</span>
-      <span class="chip ${disclosureState.unread ? "active" : ""}" id="chipUnread">未閲覧のみ</span>
+    <div class="chips" id="discChips">
+      ${chip("all", "すべて")}${chip("mine", "マイ銘柄のみ")}${chip("unread", "未閲覧のみ")}
     </div>
-    ${d.count === 0 ? '<div class="empty">取得済みの決算短信がありません。マイ銘柄を登録して「⟳ 取得」を実行してください。</div>' : `
+    ${d.count === 0 ? '<div class="empty">該当する決算短信がありません。マイ銘柄を登録して「⟳ 取得」を実行してください。</div>' : `
     <div class="table-wrap"><table>
       <thead><tr><th>状態</th><th>コード</th><th>銘柄名</th><th>種別</th><th>タイトル</th><th>公開日時</th><th>取得日時</th><th></th></tr></thead>
       <tbody>${d.items.map(disclosureRow).join("")}</tbody>
     </table></div>`}`;
-  el("chipAll").onclick = () => { disclosureState.unread = false; render(); };
-  el("chipUnread").onclick = () => { disclosureState.unread = true; render(); };
+  el("discChips").addEventListener("click", (e) => {
+    const c = e.target.closest(".chip");
+    if (!c) return;
+    disclosureState.filter = c.dataset.filter;
+    render();
+  });
 });
 
 function disclosureRow(x) {
@@ -406,9 +428,13 @@ async function disclosureDetail(app, id) {
   // 開いたら閲覧済みにする
   if (!d.is_read) { await api.post(`/disclosures/${id}/read`, { is_read: true }); d.is_read = 1; }
   const pdfUrl = api.pdfUrl(id);
+  const isExternal = /^https?:/.test(pdfUrl);
   const downloadLink = api.local
-    ? `<a class="btn small ghost" href="${pdfUrl}" download="${h(d.pdf_path || d.code + ".pdf")}">⬇ ダウンロード</a>`
+    ? `<a class="btn small ghost" href="${pdfUrl}" ${isExternal ? 'target="_blank" rel="noopener"' : `download="${h(d.pdf_path || d.code + ".pdf")}"`}>⬇ ダウンロード</a>`
     : `<a class="btn small ghost" href="${pdfUrl}?download=1">⬇ ダウンロード</a>`;
+  const externalNote = isExternal
+    ? '<div class="meta-line">PDFはTDnet(適時開示情報閲覧サービス)から直接表示しています。表示されない場合は「外部ブラウザで開く」をご利用ください。</div>'
+    : "";
   app.innerHTML = `
     <a class="back-link" href="#/disclosures">← 決算短信一覧へ戻る</a>
     <div class="page-head"><h1>${h(d.title)}</h1></div>
@@ -419,6 +445,7 @@ async function disclosureDetail(app, id) {
           ${downloadLink}
         </div>
         <iframe class="pdf-frame" src="${pdfUrl}" title="PDF"></iframe>
+        ${externalNote}
       </div>
       <div>
         <div class="card">
