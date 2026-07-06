@@ -367,7 +367,11 @@
   }
   function joinStock(d) {
     const s = stocksByCode.get(d.code) || {};
-    return Object.assign({}, d, { name: s.name, market: s.market, sector: s.sector });
+    return Object.assign({}, d, {
+      name: s.name, market: s.market, sector: s.sector,
+      market_cap: s.market_cap == null ? null : s.market_cap,
+      market_cap_label: formatOku(s.market_cap == null ? null : s.market_cap),
+    });
   }
   function lastUpdated() {
     if (mode === "real") {
@@ -536,6 +540,26 @@
     }
     if (q.unread === "1" || q.unread === "true" || q.unread === true) rows = rows.filter((x) => !x.is_read);
     if (q.doc_type) rows = rows.filter((x) => x.doc_type === q.doc_type);
+    // 時価総額での絞り込み (プリセットレンジ / 任意レンジ)
+    {
+      let lo = null, hi = null;
+      if (q.cap_min != null && q.cap_min !== "") lo = Number(q.cap_min);
+      if (q.cap_max != null && q.cap_max !== "") hi = Number(q.cap_max);
+      if (lo === null && hi === null && q.cap_range) {
+        const r = RANGES.find((x) => x.key === q.cap_range);
+        if (r) { lo = r.min; hi = r.max; }
+      }
+      if (lo !== null || hi !== null) {
+        rows = rows.filter((x) => {
+          const s = stocksByCode.get(x.code);
+          const cap = s ? s.market_cap : null;
+          if (cap == null) return false;
+          if (lo !== null && cap < lo) return false;
+          if (hi !== null && cap >= hi) return false;
+          return true;
+        });
+      }
+    }
     rows.sort((a, b) => {
       const ak = (a.published_at || a.fetched_at || ""), bk = (b.published_at || b.fetched_at || "");
       return ak > bk ? -1 : ak < bk ? 1 : b.id - a.id;

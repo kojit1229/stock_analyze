@@ -406,39 +406,67 @@ def backfill_history(out_dir, valid_codes, max_days=15):
     """アーカイブの過去方向バックフィル。
 
     state.json の oldest から過去へ max_days 営業日分を取得してマージする。
-    取得失敗した日はそこで中断し、次回同じ日から再試行する。
-    2年分に到達したら complete を立てて以後は何もしない。
+    取得に失敗した日は state["missed"] に記録して先へ進み (中断しない)、
+    次回以降の実行の冒頭で最大3回まで再試行する。
+    2年分に到達し、失敗日の再試行も尽きたら complete を立てて以後は何もしない。
     """
     state = load_history_state(out_dir)
+    missed = state.get("missed") or {}
     today = jst_now().date()
     cutoff = today - datetime.timedelta(days=HISTORY_KEEP_DAYS)
-    if state.get("complete"):
+    reached = bool(state.get("oldest")) and datetime.date.fromisoformat(state["oldest"]) <= cutoff
+    retry_targets = sorted(d for d, n in missed.items() if n < 3)[:6]
+    if state.get("complete") or (reached and not retry_targets):
+        state["complete"] = True
+        save_history_state(out_dir, state)
         log("バックフィル: 完了済み (2年分取得済み)")
         return state
-    cur = datetime.date.fromisoformat(state["oldest"]) if state.get("oldest") else today
-    processed = 0
+
     items_all = []
+    processed = 0
+
+    # 1) 過去の失敗日をまず再試行する
+    for ds in retry_targets:
+        items = fetch_tdnet_day(ds.replace("-", ""))
+        if items is None:
+            missed[ds] = missed.get(ds, 0) + 1
+            log(f"  バックフィル再試行 {ds}: 失敗 ({missed[ds]}回目)")
+        else:
+            kept = [i for i in items if valid_codes is None or i["code"] in valid_codes]
+            items_all.extend(kept)
+            missed.pop(ds, None)
+            log(f"  バックフィル再試行 {ds}: 成功 (決算関連 {len(kept)}件)")
+        time.sleep(0.5)
+
+    # 2) 過去方向へ進む (失敗しても記録して続行する)
+    cur = datetime.date.fromisoformat(state["oldest"]) if state.get("oldest") else today
     day = cur - datetime.timedelta(days=1)
     while processed < max_days and day >= cutoff:
         if day.weekday() < 5:
             items = fetch_tdnet_day(day.strftime("%Y%m%d"))
             if items is None:
-                log(f"バックフィル: {day} 取得失敗のため中断 (次回再試行)")
-                break
-            kept = [i for i in items if valid_codes is None or i["code"] in valid_codes]
-            if kept:
-                log(f"  バックフィル {day}: 決算関連 {len(kept)}件")
-            items_all.extend(kept)
+                missed[day.isoformat()] = missed.get(day.isoformat(), 0) + 1
+                log(f"  バックフィル {day}: 失敗 (記録して続行)")
+            else:
+                kept = [i for i in items if valid_codes is None or i["code"] in valid_codes]
+                if kept:
+                    log(f"  バックフィル {day}: 決算関連 {len(kept)}件")
+                items_all.extend(kept)
             processed += 1
             time.sleep(0.5)
         cur = day
         day = cur - datetime.timedelta(days=1)
+
     if items_all:
         merge_into_history(out_dir, items_all, valid_codes)
     state["oldest"] = cur.isoformat()
-    state["complete"] = cur <= cutoff
+    # 保持期間より古い失敗記録は捨てる
+    keep_cut = cutoff.isoformat()
+    state["missed"] = {d: n for d, n in missed.items() if d >= keep_cut}
+    still_retryable = any(n < 3 for n in state["missed"].values())
+    state["complete"] = (cur <= cutoff) and not still_retryable
     save_history_state(out_dir, state)
-    log(f"バックフィル: {processed}営業日分処理 / 取得済み範囲 {state['oldest']} 〜 (complete={state['complete']})")
+    log(f"バックフィル: {processed}営業日分処理 / 範囲 {state['oldest']}〜 / 失敗記録{len(state['missed'])}日 (complete={state['complete']})")
     return state
 
 
@@ -617,7 +645,7 @@ def main():
 
     generated_at = jst_now().replace(microsecond=0).isoformat()
 
-    # バックフィル専用モード: 既存の銘柄マスタを使い、アーカイブだけ進める
+    # バックフィル専用モード: 既存の銘柄マスタを使い、アーカイブと財務数値だけ進める
     if args.backfill_only:
         valid_codes = None
         try:
@@ -626,6 +654,29 @@ def main():
         except (OSError, ValueError):
             log("stocks.json が読めないためコードフィルタなしでバックフィルします")
         backfill_history(args.out, valid_codes, max_days=args.backfill_days)
+
+        # 財務数値の巡回も進める (毎時実行に載せて全銘柄カバーを早める)
+        if args.fin_per_run > 0 and valid_codes:
+            fin_path = os.path.join(args.out, "financials.json")
+            financials = {"stocks": {}}
+            try:
+                with open(fin_path, encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict) and isinstance(loaded.get("stocks"), dict):
+                        financials = loaded
+            except (OSError, ValueError):
+                pass
+            ysession, ycrumb = yahoo_session()
+            if ysession:
+                try:
+                    fetch_financials(sorted(valid_codes), financials, ysession, ycrumb,
+                                     per_run=args.fin_per_run)
+                    financials["stocks"] = {c: v for c, v in financials["stocks"].items()
+                                            if c in valid_codes}
+                    financials["updated_at"] = generated_at
+                    write_json(fin_path, financials)
+                except Exception as e:  # noqa: BLE001
+                    log(f"財務数値の取得でエラー: {e}")
         return
 
     # 1) 銘柄マスタ (失敗したら致命的)

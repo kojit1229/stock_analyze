@@ -136,6 +136,9 @@ def get_disclosures(params, query, body):
         "code": query.get("code"),
         "unread": query.get("unread"),
         "doc_type": query.get("doc_type"),
+        "cap_range": query.get("cap_range"),
+        "cap_min": query.get("cap_min"),
+        "cap_max": query.get("cap_max"),
     }
     items = models.list_disclosures(filters)
     return {"count": len(items), "items": items}
