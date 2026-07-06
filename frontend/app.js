@@ -429,23 +429,35 @@ async function disclosureDetail(app, id) {
   if (!d.is_read) { await api.post(`/disclosures/${id}/read`, { is_read: true }); d.is_read = 1; }
   const pdfUrl = api.pdfUrl(id);
   const isExternal = /^https?:/.test(pdfUrl);
-  const downloadLink = api.local
-    ? `<a class="btn small ghost" href="${pdfUrl}" ${isExternal ? 'target="_blank" rel="noopener"' : `download="${h(d.pdf_path || d.code + ".pdf")}"`}>⬇ ダウンロード</a>`
-    : `<a class="btn small ghost" href="${pdfUrl}?download=1">⬇ ダウンロード</a>`;
-  const externalNote = isExternal
-    ? '<div class="meta-line">PDFはTDnet(適時開示情報閲覧サービス)から直接表示しています。表示されない場合は「外部ブラウザで開く」をご利用ください。</div>'
-    : "";
+  const hasPdf = !!pdfUrl;
+  const downloadLink = !hasPdf ? ""
+    : api.local
+      ? `<a class="btn small ghost" href="${pdfUrl}" ${isExternal ? 'target="_blank" rel="noopener"' : `download="${h(d.pdf_path || d.code + ".pdf")}"`}>⬇ ダウンロード</a>`
+      : `<a class="btn small ghost" href="${pdfUrl}?download=1">⬇ ダウンロード</a>`;
+  // 外部PDF (TDnet) はサイト側の制約で埋め込み表示できない場合があるため、
+  // 開くボタンを主動線にし、埋め込みはベストエフォートとする
+  const viewer = !hasPdf
+    ? `<div class="empty">この資料のPDFはTDnetの掲載期間(約1ヶ月)を過ぎたため取得できません。<br>
+         <a class="btn" style="margin-top:10px;display:inline-block" target="_blank" rel="noopener"
+            href="https://www.google.com/search?q=${encodeURIComponent((d.title || "").slice(0, 60) + " PDF")}">🔎 Webで検索する</a></div>`
+    : isExternal
+      ? `<div class="pdf-toolbar">
+           <a class="btn" href="${pdfUrl}" target="_blank" rel="noopener">📄 PDFを開く（TDnet）</a>
+           ${downloadLink}
+         </div>
+         <iframe class="pdf-frame" src="${pdfUrl}" title="PDF"></iframe>
+         <div class="meta-line">PDFはTDnet(適時開示情報閲覧サービス)のものです。上の枠に表示されない場合は「📄 PDFを開く」で新しいタブで開いてください。</div>`
+      : `<div class="pdf-toolbar">
+           <a class="btn small" href="${pdfUrl}" target="_blank">🔍 外部ブラウザで開く</a>
+           ${downloadLink}
+         </div>
+         <iframe class="pdf-frame" src="${pdfUrl}" title="PDF"></iframe>`;
   app.innerHTML = `
     <a class="back-link" href="#/disclosures">← 決算短信一覧へ戻る</a>
     <div class="page-head"><h1>${h(d.title)}</h1></div>
     <div class="grid cols-2" style="grid-template-columns:2fr 1fr">
       <div class="card">
-        <div class="pdf-toolbar">
-          <a class="btn small" href="${pdfUrl}" target="_blank">🔍 外部ブラウザで開く</a>
-          ${downloadLink}
-        </div>
-        <iframe class="pdf-frame" src="${pdfUrl}" title="PDF"></iframe>
-        ${externalNote}
+        ${viewer}
       </div>
       <div>
         <div class="card">
@@ -788,6 +800,13 @@ async function loadHistoryStateInfo() {
   return st;
 }
 
+// TDnetミラーのリダイレクタ (rd.php?<URL>) を剥がして直接URLにする
+// (リダイレクタは応答が不安定で、PDFが開けない原因になる)
+function directPdfUrl(url) {
+  const m = /rd\.php\?(https?:\/\/.+)$/.exec(url || "");
+  return m ? m[1] : (url || "");
+}
+
 async function fetchCompanyHistory(code) {
   const shard = await loadHistoryShard(code[0]);
   const rows = (shard.codes || {})[code] || [];
@@ -796,7 +815,7 @@ async function fetchCompanyHistory(code) {
     published_at: r[0],
     doc_type: r[1],
     title: r[2],
-    pdf_url: r[3] || "",
+    pdf_url: directPdfUrl(r[3] || ""),
   }));
 }
 

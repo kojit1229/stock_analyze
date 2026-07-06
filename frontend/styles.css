@@ -128,15 +128,16 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .chip:hover { color: var(--text); }
 .chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 
-/* ---- Buttons ---- */
-button.btn {
+/* ---- Buttons (button 要素・a 要素の両方に効かせる) ---- */
+.btn {
   background: var(--accent); color: #fff; border: none; padding: 8px 14px;
   border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px;
+  text-decoration: none; display: inline-block; line-height: 1.5;
 }
-button.btn:hover { filter: brightness(1.08); }
-button.btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
-button.btn.danger { background: var(--danger); }
-button.btn.small { padding: 5px 10px; font-size: 12px; }
+.btn:hover { filter: brightness(1.08); text-decoration: none; }
+.btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+.btn.danger { background: var(--danger); }
+.btn.small { padding: 5px 10px; font-size: 12px; }
 button.icon-btn { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 15px; }
 button.icon-btn:hover { color: var(--text); }
 
