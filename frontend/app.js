@@ -764,30 +764,34 @@ function classifyDocJs(title) {
   return null;
 }
 
-function jsonpFetch(src, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const cb = "__yano_" + Math.random().toString(36).slice(2, 10);
-    const s = document.createElement("script");
-    const timer = setTimeout(() => { cleanup(); reject(new Error("タイムアウト")); }, timeoutMs || 20000);
-    function cleanup() { clearTimeout(timer); delete window[cb]; s.remove(); }
-    window[cb] = (data) => { cleanup(); resolve(data); };
-    s.src = src + cb;
-    s.onerror = () => { cleanup(); reject(new Error("読み込み失敗")); };
-    document.head.appendChild(s);
-  });
+// やのしんAPIは CORS ヘッダを返さないため、直接 fetch が失敗した場合は
+// 公開CORSプロキシを順に試す (静的サイトからの取得を成立させるための措置)
+const CORS_PROXIES = [
+  (u) => "https://corsproxy.io/?url=" + encodeURIComponent(u),
+  (u) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
+];
+
+async function fetchJsonWithCors(url) {
+  const attempts = [url, ...CORS_PROXIES.map((p) => p(url))];
+  let lastErr = null;
+  for (const u of attempts) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 25000);
+      const res = await fetch(u, { mode: "cors", signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return await res.json();
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("取得できませんでした");
 }
 
 async function fetchCompanyHistory(code, years) {
   const url = `${YANOSHIN_LIST}${encodeURIComponent(code)}.json?limit=300`;
-  let data;
-  try {
-    const res = await fetch(url, { mode: "cors" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    data = await res.json();
-  } catch (e) {
-    // CORS 不可の場合は JSONP にフォールバック
-    data = await jsonpFetch(url + "&callback=");
-  }
+  const data = await fetchJsonWithCors(url);
   const cutoff = new Date();
   cutoff.setFullYear(cutoff.getFullYear() - (years || 2));
   const cutStr = cutoff.toISOString().slice(0, 10);
@@ -830,12 +834,11 @@ async function bulkFetchHistory(codes, statusEl) {
     done++;
     await new Promise((r) => setTimeout(r, 700));
   }
-  if (statusEl) {
-    statusEl.textContent = failed.length
-      ? `完了: ${ok}/${codes.length}銘柄を取得 (失敗: ${failed.join(", ")})`
-      : `完了: ${ok}銘柄の決算短信履歴(直近2年分)を取得しました`;
-  }
-  return ok;
+  const message = failed.length
+    ? `完了: ${ok}/${codes.length}銘柄を取得 (失敗: ${failed.join(", ")})`
+    : `完了: ${ok}銘柄の決算短信履歴(直近2年分)を取得しました`;
+  if (statusEl) statusEl.textContent = message;
+  return { ok, message };
 }
 
 // 開示履歴の表示 (キャッシュ + 全体データをマージ)
@@ -905,7 +908,7 @@ route("analysis", async (app, rest) => {
         <div class="checklist" id="an_checklist">${checkboxes}</div>
         <button class="btn" id="an_bulk">選択した銘柄の決算短信をまとめて取得</button>
         <div class="fetch-status" id="an_bulk_status"></div>
-        <div class="meta-line">※ TDnet本体の掲載期間(約1ヶ月)を過ぎた資料はPDFリンクが切れている場合があります(🔎でWeb検索できます)。取得結果はこのブラウザに保存されます。</div>
+        <div class="meta-line">※ TDnet本体の掲載期間(約1ヶ月)を過ぎた資料はPDFリンクが切れている場合があります(🔎でWeb検索できます)。取得結果はこのブラウザに保存されます。取得は公開CORSプロキシ経由になる場合があります。</div>
       ` : '<div class="empty">マイ銘柄が未登録です。<a class="link" href="#/schedule">決算予定</a>から登録すると、まとめて取得できます。</div>'}
     </div>
     <div id="an_body">${code ? '<div class="loading">読み込み中…</div>' : '<div class="empty">銘柄を選択してください</div>'}</div>`;
@@ -1026,10 +1029,13 @@ async function renderAnalysisBody(code) {
     const btn = el("an_fetch_one");
     btn.disabled = true;
     try {
-      await bulkFetchHistory([code], el("an_one_status"));
-      renderAnalysisBody(code);
+      const res = await bulkFetchHistory([code], el("an_one_status"));
+      await renderAnalysisBody(code);
+      const st = el("an_one_status");
+      if (st) st.textContent = res.message;
     } finally {
-      btn.disabled = false;
+      const btn2 = el("an_fetch_one");
+      if (btn2) btn2.disabled = false;
     }
   };
 }
