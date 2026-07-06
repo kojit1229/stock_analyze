@@ -5,17 +5,46 @@
 // API クライアント
 // ---------------------------------------------------------------------------
 const api = {
+  // local=true のとき、サーバの代わりに LocalApi (local-api.js) で処理する。
+  // GitHub Pages などの静的ホスティングでは /api/* が存在しないため、
+  // 初回失敗時に自動でローカルモードへフォールバックする。
+  local: false,
   async req(method, path, body) {
+    if (this.local && window.LocalApi) return window.LocalApi.handle(method, path, body);
     const opt = { method, headers: {} };
     if (body !== undefined) {
       opt.headers["Content-Type"] = "application/json";
       opt.body = JSON.stringify(body);
     }
-    const res = await fetch("/api" + path, opt);
-    const text = await res.text();
-    const data = text ? JSON.parse(text) : null;
-    if (!res.ok) throw new Error((data && data.error) || res.statusText);
-    return data;
+    try {
+      const res = await fetch("/api" + path, opt);
+      const text = await res.text();
+      let data = null;
+      if (text) {
+        try { data = JSON.parse(text); }
+        catch (e) {
+          // JSON でない応答 (静的ホスティングの404ページ等) → フォールバック対象
+          const err = new Error("APIが見つかりません");
+          err.fallback = true;
+          throw err;
+        }
+      }
+      if (!res.ok) throw new Error((data && data.error) || res.statusText);
+      return data;
+    } catch (e) {
+      if (window.LocalApi && (e.fallback || e instanceof TypeError)) {
+        this.local = true;
+        markLocalMode();
+        return window.LocalApi.handle(method, path, body);
+      }
+      throw e;
+    }
+  },
+  // PDF の表示/ダウンロード用 URL (ローカルモードでは Blob URL を生成)
+  pdfUrl(id) {
+    return this.local && window.LocalApi
+      ? window.LocalApi.pdfBlobUrl(id)
+      : `/api/disclosures/${id}/pdf`;
   },
   get(p) { return this.req("GET", p); },
   post(p, b) { return this.req("POST", p, b || {}); },
@@ -35,6 +64,20 @@ function toast(msg, isError) {
   t.textContent = msg;
   t.className = "toast show" + (isError ? " error" : "");
   setTimeout(() => (t.className = "toast"), 2600);
+}
+
+// 静的デモモード (GitHub Pages 等) のインジケータ
+let _localMarked = false;
+function markLocalMode() {
+  if (_localMarked) return;
+  _localMarked = true;
+  const brand = document.querySelector(".brand-name");
+  if (brand) {
+    brand.insertAdjacentHTML(
+      "afterend",
+      '<span class="badge market" title="サーバなしで動作中。データはこのブラウザ(localStorage)に保存されます">デモ</span>'
+    );
+  }
 }
 
 function fmtDate(d) {
@@ -362,7 +405,10 @@ async function disclosureDetail(app, id) {
   const d = await api.get("/disclosures/" + id);
   // 開いたら閲覧済みにする
   if (!d.is_read) { await api.post(`/disclosures/${id}/read`, { is_read: true }); d.is_read = 1; }
-  const pdfUrl = `/api/disclosures/${id}/pdf`;
+  const pdfUrl = api.pdfUrl(id);
+  const downloadLink = api.local
+    ? `<a class="btn small ghost" href="${pdfUrl}" download="${h(d.pdf_path || d.code + ".pdf")}">⬇ ダウンロード</a>`
+    : `<a class="btn small ghost" href="${pdfUrl}?download=1">⬇ ダウンロード</a>`;
   app.innerHTML = `
     <a class="back-link" href="#/disclosures">← 決算短信一覧へ戻る</a>
     <div class="page-head"><h1>${h(d.title)}</h1></div>
@@ -370,7 +416,7 @@ async function disclosureDetail(app, id) {
       <div class="card">
         <div class="pdf-toolbar">
           <a class="btn small" href="${pdfUrl}" target="_blank">🔍 外部ブラウザで開く</a>
-          <a class="btn small ghost" href="${pdfUrl}?download=1">⬇ ダウンロード</a>
+          ${downloadLink}
         </div>
         <iframe class="pdf-frame" src="${pdfUrl}" title="PDF"></iframe>
       </div>
@@ -543,5 +589,10 @@ async function runFetch() {
 // 初期化
 // ---------------------------------------------------------------------------
 el("globalFetch").onclick = runFetch;
+// GitHub Pages / file:// では最初からローカルモードで起動する
+if (window.LocalApi && (location.protocol === "file:" || /\.github\.io$/.test(location.hostname))) {
+  api.local = true;
+  markLocalMode();
+}
 if (!location.hash) location.hash = "#/home";
 render();
