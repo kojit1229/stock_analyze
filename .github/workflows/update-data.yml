@@ -27,8 +27,16 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: pip install requests pandas xlrd openpyxl
-      - name: Fetch real data (JPX / TDnet)
+      - name: Fetch real data (JPX / TDnet / Yahoo)
         run: python scripts/fetch_real_data.py --out frontend/data
+      - name: Probe yanoshin CORS headers (診断用)
+        continue-on-error: true
+        run: |
+          echo "--- response headers ---"
+          curl -sI --max-time 30 "https://webapi.yanoshin.jp/webapi/tdnet/list/7203.json?limit=1" | head -25 || true
+          echo "--- jsonp probe ---"
+          curl -s --max-time 30 "https://webapi.yanoshin.jp/webapi/tdnet/list/7203.json?limit=1&callback=cbtest" | head -c 200 || true
+          echo
       - name: Commit and push if changed
         run: |
           git config user.name "github-actions[bot]"

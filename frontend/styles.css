@@ -185,3 +185,40 @@ textarea { min-height: 70px; resize: vertical; }
 .toast.error { border-color: var(--danger); }
 
 .loading { color: var(--text-dim); padding: 30px; text-align: center; }
+
+/* ---- Charts (銘柄分析 / 銘柄比較) ---- */
+.chart-box {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 14px 8px;
+}
+.chart-title { font-size: 13px; font-weight: 700; margin-bottom: 8px; }
+.chart-svg { width: 100%; height: auto; display: block; }
+.chart-tick { fill: var(--text-dim); font-size: 10px; }
+.chart-legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 6px 2px; }
+.chart-leg { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim); }
+.chart-leg i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
+.charts-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+@media (max-width: 900px) { .charts-grid { grid-template-columns: 1fr; } }
+
+/* ---- 銘柄ピッカー・チェックリスト ---- */
+.picker-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.picker-bar select, .picker-bar input { width: auto; min-width: 160px; }
+.checklist { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.checklist label {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+  cursor: pointer; font-size: 12px;
+}
+.checklist input { width: auto; }
+.fetch-status { color: var(--text-dim); font-size: 12px; margin-top: 6px; min-height: 18px; }
+
+/* ---- 比較タブ ---- */
+.cmp-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px;
+  background: rgba(59,130,246,.15); color: #60a5fa; border-radius: 999px;
+  font-size: 12px; font-weight: 700;
+}
+.cmp-chip button { background: none; border: none; color: #93c5fd; cursor: pointer; font-size: 13px; padding: 0; }
+.metric-name { color: var(--text-dim); white-space: nowrap; }
+td.pos { color: #4ade80; }
+td.neg { color: #f87171; }
