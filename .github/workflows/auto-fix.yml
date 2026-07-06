@@ -1,0 +1,87 @@
+name: Auto-fix (frontend)
+
+# フロントエンドの合格ゲートが失敗していないか定期チェックし、
+# 失敗していれば Claude Code に修正させ、直ったら PR を作る自律メンテナンス。
+on:
+  schedule:
+    - cron: "0 21 * * *"   # 毎日 06:00 JST (UTC 21:00)
+  workflow_dispatch:
+    inputs:
+      max_iter:
+        description: "最大修正反復回数"
+        required: false
+        default: "6"
+
+concurrency:
+  group: auto-fix
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (jsdom)
+        run: npm ci || npm install
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run auto-fix loop
+        id: fix
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MAX_ITER: ${{ github.event.inputs.max_iter || '6' }}
+        run: |
+          set +e
+          bash scripts/harness/fix_loop.sh 2>&1 | tee /tmp/loop.log
+          rc=${PIPESTATUS[0]}
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if git diff --quiet -- frontend; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open PR with fixes
+        if: steps.fix.outputs.rc == '0' && steps.fix.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: auto-fix/frontend
+          delete-branch: true
+          commit-message: "fix(frontend): 自動修正ループによるゲート復旧"
+          title: "🤖 自動修正: フロントエンドのゲート復旧"
+          labels: automated, frontend
+          body: |
+            自動修正ハーネスがフロントエンドの合格ゲート失敗を検知し、修正しました。
+
+            **ゲート内容**
+            - 構文チェック (`node --check`)
+            - ローカルAPI回帰 (`check_local_api.mjs`)
+            - UIスモーク：全ルート描画＋ボタン操作 (`smoke_ui.mjs`)
+
+            **最終状態:** `GATE: PASS` ✅
+
+            マージ前に必ず差分をご確認ください。
+
+      - name: Fail if unresolved
+        if: steps.fix.outputs.rc != '0'
+        run: |
+          echo "::error::自動修正で解決できませんでした (rc=${{ steps.fix.outputs.rc }})。人手の確認が必要です。"
+          exit 1

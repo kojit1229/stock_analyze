@@ -1,0 +1,17 @@
+{
+  "name": "stock_analyze",
+  "version": "1.0.0",
+  "description": "決算ナビ — 決算発表予定の確認と決算短信PDFの自動取得・閲覧を効率化するWebアプリ",
+  "private": true,
+  "scripts": {
+    "check:api": "node scripts/check_local_api.mjs",
+    "check:ui": "node scripts/smoke_ui.mjs",
+    "gate": "bash scripts/harness/gate.sh",
+    "fix": "bash scripts/harness/fix_loop.sh"
+  },
+  "repository": { "type": "git", "url": "git+https://github.com/kojit1229/stock_analyze.git" },
+  "license": "ISC",
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}
