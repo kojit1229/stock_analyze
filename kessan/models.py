@@ -314,8 +314,18 @@ def list_disclosures(filters=None):
         where.append("d.doc_type = ?")
         params.append(filters["doc_type"])
 
+    # 時価総額での絞り込み (決算予定一覧と同じ指定方法)
+    cap_min, cap_max = _resolve_cap(filters)
+    if cap_min is not None:
+        where.append("s.market_cap >= ?")
+        params.append(cap_min)
+    if cap_max is not None:
+        where.append("s.market_cap < ?")
+        params.append(cap_max)
+
     sql = f"""
-        SELECT d.*, s.name AS name, s.market AS market, s.sector AS sector
+        SELECT d.*, s.name AS name, s.market AS market, s.sector AS sector,
+               s.market_cap AS market_cap
         FROM disclosures d JOIN stocks s ON s.code = d.code
         {"WHERE " + " AND ".join(where) if where else ""}
         ORDER BY d.fetched_at DESC, d.id DESC
@@ -323,7 +333,12 @@ def list_disclosures(filters=None):
     conn = db.connect()
     try:
         rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["market_cap_label"] = mc.format_oku(d.get("market_cap"))
+            result.append(d)
+        return result
     finally:
         conn.close()
 

@@ -376,31 +376,46 @@ async function removeMyStock(code) {
 // ---------------------------------------------------------------------------
 // 決算短信一覧画面
 // ---------------------------------------------------------------------------
-const disclosureState = { filter: "all", code: "" }; // all | mine | unread
+const disclosureState = { filter: "all", code: "", cap: "" }; // filter: all | mine | unread
 
 route("disclosures", async (app, rest) => {
   if (rest && rest.length) return disclosureDetail(app, rest[0]);
-  const q = disclosureState.filter === "unread" ? "?unread=1"
-    : disclosureState.filter === "mine" ? "?mine=1" : "";
-  const d = await api.get("/disclosures" + q);
+  const qp = new URLSearchParams();
+  if (disclosureState.filter === "unread") qp.set("unread", "1");
+  if (disclosureState.filter === "mine") qp.set("mine", "1");
+  if (disclosureState.cap) qp.set("cap_range", disclosureState.cap);
+  const qs = qp.toString();
+  const [d, caps] = await Promise.all([
+    api.get("/disclosures" + (qs ? "?" + qs : "")),
+    api.get("/cap-ranges"),
+  ]);
   const chip = (key, label) =>
     `<span class="chip ${disclosureState.filter === key ? "active" : ""}" data-filter="${key}">${label}</span>`;
   app.innerHTML = `
     <div class="page-head"><h1>決算短信</h1><span class="sub">${d.count}件</span></div>
-    <div class="chips" id="discChips">
+    <div class="chips" id="discChips" style="align-items:center">
       ${chip("all", "すべて")}${chip("mine", "マイ銘柄のみ")}${chip("unread", "未閲覧のみ")}
+      <select id="disc_cap" style="width:auto;margin-left:6px">
+        <option value="">時価総額: すべて</option>
+        ${caps.ranges.map((r) => `<option value="${r.key}" ${disclosureState.cap === r.key ? "selected" : ""}>${h(r.label)}</option>`).join("")}
+      </select>
     </div>
-    ${d.count === 0 ? '<div class="empty">該当する決算短信がありません。マイ銘柄を登録して「⟳ 取得」を実行してください。</div>' : `
+    ${d.count === 0 ? '<div class="empty">該当する決算短信がありません。条件を変更するか、マイ銘柄を登録して「⟳ 取得」を実行してください。</div>' : `
     <div class="table-wrap"><table>
-      <thead><tr><th>状態</th><th>コード</th><th>銘柄名</th><th>種別</th><th>タイトル</th><th>公開日時</th><th>取得日時</th><th></th></tr></thead>
+      <thead><tr><th>状態</th><th>コード</th><th>銘柄名</th><th>時価総額</th><th>種別</th><th>タイトル</th><th>公開日時</th><th>取得日時</th><th></th></tr></thead>
       <tbody>${d.items.map(disclosureRow).join("")}</tbody>
-    </table></div>`}`;
+    </table></div>`}
+    <div class="meta-line" style="margin-top:10px">一覧のデータはGitHub Actionsが定期取得しリポジトリ(frontend/data/)に格納したものです。PDF本体はアプリには保存せず、TDnetのPDFを直接開きます(過去2年分の履歴は銘柄分析タブから)。閲覧状態・コメントはこのブラウザに保存されます。</div>`;
   el("discChips").addEventListener("click", (e) => {
     const c = e.target.closest(".chip");
     if (!c) return;
     disclosureState.filter = c.dataset.filter;
     render();
   });
+  el("disc_cap").onchange = () => {
+    disclosureState.cap = el("disc_cap").value;
+    render();
+  };
 });
 
 function disclosureRow(x) {
@@ -412,6 +427,7 @@ function disclosureRow(x) {
     <td>${read}</td>
     <td class="code-cell">${h(x.code)}</td>
     <td>${h(x.name)}</td>
+    <td class="num">${h(x.market_cap_label || "-")}</td>
     <td><span class="badge ${corr}">${h(x.doc_type || "")}</span></td>
     <td><a class="link" href="#/disclosures/${x.id}">${h(x.title)}</a></td>
     <td>${fmtDateTime(x.published_at)}</td>
@@ -785,6 +801,21 @@ async function loadHistoryShard(prefix) {
   return shard;
 }
 
+let _metaInfoCache = null;
+async function loadMetaInfo() {
+  if (_metaInfoCache) return _metaInfoCache;
+  let m = {};
+  try {
+    const res = await fetch("data/meta.json", { cache: "no-cache" });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && typeof data === "object") m = data;
+    }
+  } catch (e) { /* 未構築 */ }
+  _metaInfoCache = m;
+  return m;
+}
+
 let _histStateCache = null;
 async function loadHistoryStateInfo() {
   if (_histStateCache) return _histStateCache;
@@ -952,6 +983,12 @@ async function renderAnalysisBody(code) {
     return;
   }
   const findata = await loadFinancials();
+  const metaInfo = await loadMetaInfo();
+  const finGot = Object.keys(findata.stocks || {}).filter((c) => {
+    const v = findata.stocks[c];
+    return v && ((v.a && v.a.length) || (v.q && v.q.length));
+  }).length;
+  const finTotal = (metaInfo.counts && metaInfo.counts.stocks) || null;
   const fin = findata.stocks[code] || { a: [], q: [] };
   const rows = analysisView.mode === "q" ? (fin.q || []) : (fin.a || []);
   const labels = rows.map((r) => periodLabel(r[0]));
@@ -994,7 +1031,9 @@ async function renderAnalysisBody(code) {
       ${sum("営業利益", last[2], yoyPct(last[2], prev && prev[2]), fmtMoney)}
       ${sum("営業利益率", last[1] && last[2] != null ? (last[2] / last[1]) * 100 : null, null, fmtPct)}
       ${sum("EPS", last[4], yoyPct(last[4], prev && prev[4]), (v) => (v == null ? "-" : v.toFixed(1) + "円"))}
-    </div>` : '<div class="card" style="margin-bottom:14px"><div class="empty">財務数値データがまだありません(データ更新の巡回取得をお待ちください)</div></div>'}
+    </div>` : `<div class="card" style="margin-bottom:14px"><div class="empty">この銘柄の財務数値(売上高・利益など)はまだ取得されていません。<br>
+      全${finTotal ? finTotal.toLocaleString("en-US") : ""}銘柄をコード順に自動巡回中です(取得済み: ${finGot.toLocaleString("en-US")}銘柄・毎時拡大)。<br>
+      取得され次第、ここに指標と推移チャートが表示されます。</div></div>`}
     <div class="card" style="margin-bottom:14px">
       <h2>📊 決算数値の推移
         <span style="margin-left:auto;display:inline-flex;gap:6px">

@@ -26,8 +26,8 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: pip install requests
-      - name: Backfill disclosure history (25営業日/回)
-        run: python scripts/fetch_real_data.py --out frontend/data --backfill-only --backfill-days 25
+      - name: Backfill disclosure history + financials rotation
+        run: python scripts/fetch_real_data.py --out frontend/data --backfill-only --backfill-days 25 --fin-per-run 300
       - name: Commit and push if changed
         run: |
           git config user.name "github-actions[bot]"
@@ -36,7 +36,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "変更なし"
           else
-            git commit -m "開示アーカイブ更新: 過去分バックフィル (自動)"
+            git commit -m "データ更新: 開示アーカイブ・財務数値の巡回 (自動)"
             git pull --rebase origin main || true
             git push origin main
           fi
