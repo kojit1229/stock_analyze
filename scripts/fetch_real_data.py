@@ -235,6 +235,49 @@ def classify_doc(title):
     return None
 
 
+def fetch_tdnet_day(ds, per_day_limit=3000):
+    """1日分の TDnet 開示を取得し、決算関連のみを dict のリストで返す。
+
+    取得に失敗した場合は None を返す (呼び出し側で再試行を判断)。
+    """
+    url = YANOSHIN_URL.format(start=ds, end=ds)
+    items = None
+    for attempt in (1, 2):
+        try:
+            items = http_get(url, params={"limit": per_day_limit}, timeout=45).json().get("items", [])
+            break
+        except Exception as e:  # noqa: BLE001
+            log(f"  {ds}: 取得失敗 (試行{attempt}) {type(e).__name__}: {e}")
+            time.sleep(3)
+    if items is None:
+        return None
+    out = []
+    for it in items:
+        t = it.get("Tdnet") or it  # 念のため両対応
+        title = str(t.get("title", "") or "")
+        doc_type = classify_doc(title)
+        if not doc_type:
+            continue
+        code = normalize_code(t.get("company_code", ""))
+        if not code:
+            continue
+        pub = str(t.get("pubdate", "") or "").strip()
+        published_at = pub.replace(" ", "T") if pub else None
+        pdf_url = t.get("document_url") or ""
+        tid = str(t.get("id", "") or "")
+        if not tid:
+            tid = hashlib.md5(f"{code}|{published_at}|{title}".encode()).hexdigest()[:12]
+        out.append({
+            "key": tid,
+            "code": code,
+            "title": title,
+            "pdf_url": pdf_url,
+            "doc_type": doc_type,
+            "published_at": published_at,
+        })
+    return out
+
+
 def fetch_disclosures(days=35, per_day_limit=3000):
     """TDnet 開示を日別に取得する。
 
@@ -249,53 +292,154 @@ def fetch_disclosures(days=35, per_day_limit=3000):
         if d.weekday() >= 5:  # 土日は開示なし
             continue
         ds = d.strftime("%Y%m%d")
-        url = YANOSHIN_URL.format(start=ds, end=ds)
-        items = None
-        for attempt in (1, 2):
-            try:
-                items = http_get(url, params={"limit": per_day_limit}, timeout=45).json().get("items", [])
-                break
-            except Exception as e:  # noqa: BLE001
-                log(f"  {ds}: 取得失敗 (試行{attempt}) {type(e).__name__}: {e}")
-                time.sleep(3)
+        items = fetch_tdnet_day(ds, per_day_limit)
         if items is None:
             fail_days += 1
             continue
         ok_days += 1
         day_count = 0
-        for it in items:
-            t = it.get("Tdnet") or it  # 念のため両対応
-            title = str(t.get("title", "") or "")
-            doc_type = classify_doc(title)
-            if not doc_type:
+        for item in items:
+            if item["key"] in seen:
                 continue
-            code = normalize_code(t.get("company_code", ""))
-            if not code:
-                continue
-            pub = str(t.get("pubdate", "") or "").strip()
-            published_at = pub.replace(" ", "T") if pub else None
-            pdf_url = t.get("document_url") or ""
-            tid = str(t.get("id", "") or "")
-            if not tid:
-                tid = hashlib.md5(f"{code}|{published_at}|{title}".encode()).hexdigest()[:12]
-            if tid in seen:
-                continue
-            seen.add(tid)
+            seen.add(item["key"])
             day_count += 1
-            out.append({
-                "key": tid,
-                "code": code,
-                "title": title,
-                "pdf_url": pdf_url,
-                "doc_type": doc_type,
-                "published_at": published_at,
-            })
+            out.append(item)
         if day_count:
             log(f"  {ds}: 決算関連 {day_count}件")
         time.sleep(0.5)
     out.sort(key=lambda x: x["published_at"] or "", reverse=True)
     log(f"決算関連開示: {len(out)}件 (成功{ok_days}日 / 失敗{fail_days}日)")
     return out
+
+
+# ---------------------------------------------------------------------------
+# 開示履歴アーカイブ (過去2年分。銘柄コード先頭1文字ごとのシャードJSON)
+#
+# やのしんAPIはブラウザから直接利用できない (CORS非対応・応答が遅く公開
+# プロキシのタイムアウトも超過する) ことが判明したため、過去分の決算短信
+# 履歴はここで日次バックフィルにより蓄積し、静的JSONとしてアプリに配る。
+# ---------------------------------------------------------------------------
+HISTORY_KEEP_DAYS = 750  # 約2年 + 余裕
+HISTORY_URL_KEEP_DAYS = 45  # これより古いPDFはTDnetから削除済みのためURLを持たない
+
+
+def _hist_dir(out_dir):
+    d = os.path.join(out_dir, "history")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def load_history_state(out_dir):
+    try:
+        with open(os.path.join(_hist_dir(out_dir), "state.json"), encoding="utf-8") as f:
+            s = json.load(f)
+            if isinstance(s, dict):
+                return s
+    except (OSError, ValueError):
+        pass
+    return {"oldest": None, "complete": False}
+
+
+def save_history_state(out_dir, state):
+    write_json(os.path.join(_hist_dir(out_dir), "state.json"), state)
+
+
+def merge_into_history(out_dir, items, valid_codes=None):
+    """開示アイテム群をシャードにマージする。
+
+    シャード構造: {"codes": {code: [[published_at, doc_type, title, pdf_url], ...]}}
+    (published_at 降順)。古いアイテムの pdf_url は削除して容量を抑える。
+    """
+    hist_dir = _hist_dir(out_dir)
+    now = jst_now()
+    url_cutoff = (now - datetime.timedelta(days=HISTORY_URL_KEEP_DAYS)).strftime("%Y-%m-%dT00:00:00")
+    keep_cutoff = (now - datetime.timedelta(days=HISTORY_KEEP_DAYS)).strftime("%Y-%m-%dT00:00:00")
+
+    by_prefix = {}
+    for it in items:
+        code = it["code"]
+        if valid_codes is not None and code not in valid_codes:
+            continue
+        if not it.get("published_at") or it["published_at"] < keep_cutoff:
+            continue
+        by_prefix.setdefault(code[0], []).append(it)
+
+    total_added = 0
+    for prefix, plist in sorted(by_prefix.items()):
+        path = os.path.join(hist_dir, f"{prefix}.json")
+        shard = {"codes": {}}
+        try:
+            with open(path, encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict) and isinstance(loaded.get("codes"), dict):
+                    shard = loaded
+        except (OSError, ValueError):
+            pass
+        changed = False
+        for it in plist:
+            rows = shard["codes"].setdefault(it["code"], [])
+            ident = (it["published_at"][:16], it["title"][:40])
+            if any((r[0][:16], r[2][:40]) == ident for r in rows):
+                continue
+            url = it.get("pdf_url") or ""
+            if it["published_at"] < url_cutoff:
+                url = ""
+            rows.append([it["published_at"], it["doc_type"], it["title"], url])
+            changed = True
+            total_added += 1
+        if changed:
+            # 整理: 期限切れの削除・URLの剥落・降順ソート
+            for code, rows in shard["codes"].items():
+                rows[:] = [
+                    [r[0], r[1], r[2], (r[3] if r[0] >= url_cutoff else "")]
+                    for r in rows if r[0] >= keep_cutoff
+                ]
+                rows.sort(key=lambda r: r[0], reverse=True)
+            shard["codes"] = {c: r for c, r in shard["codes"].items() if r}
+            write_json(path, shard)
+    if total_added:
+        log(f"開示アーカイブ: {total_added}件追加")
+    return total_added
+
+
+def backfill_history(out_dir, valid_codes, max_days=15):
+    """アーカイブの過去方向バックフィル。
+
+    state.json の oldest から過去へ max_days 営業日分を取得してマージする。
+    取得失敗した日はそこで中断し、次回同じ日から再試行する。
+    2年分に到達したら complete を立てて以後は何もしない。
+    """
+    state = load_history_state(out_dir)
+    today = jst_now().date()
+    cutoff = today - datetime.timedelta(days=HISTORY_KEEP_DAYS)
+    if state.get("complete"):
+        log("バックフィル: 完了済み (2年分取得済み)")
+        return state
+    cur = datetime.date.fromisoformat(state["oldest"]) if state.get("oldest") else today
+    processed = 0
+    items_all = []
+    day = cur - datetime.timedelta(days=1)
+    while processed < max_days and day >= cutoff:
+        if day.weekday() < 5:
+            items = fetch_tdnet_day(day.strftime("%Y%m%d"))
+            if items is None:
+                log(f"バックフィル: {day} 取得失敗のため中断 (次回再試行)")
+                break
+            kept = [i for i in items if valid_codes is None or i["code"] in valid_codes]
+            if kept:
+                log(f"  バックフィル {day}: 決算関連 {len(kept)}件")
+            items_all.extend(kept)
+            processed += 1
+            time.sleep(0.5)
+        cur = day
+        day = cur - datetime.timedelta(days=1)
+    if items_all:
+        merge_into_history(out_dir, items_all, valid_codes)
+    state["oldest"] = cur.isoformat()
+    state["complete"] = cur <= cutoff
+    save_history_state(out_dir, state)
+    log(f"バックフィル: {processed}営業日分処理 / 取得済み範囲 {state['oldest']} 〜 (complete={state['complete']})")
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -464,10 +608,25 @@ def main():
     parser.add_argument("--keep-days", type=int, default=45, help="開示の保持日数")
     parser.add_argument("--fin-per-run", type=int, default=400,
                         help="1回の実行で財務数値を更新する銘柄数 (巡回)")
+    parser.add_argument("--backfill-days", type=int, default=15,
+                        help="開示アーカイブを過去方向へ何営業日分バックフィルするか")
+    parser.add_argument("--backfill-only", action="store_true",
+                        help="開示アーカイブのバックフィルのみ実行する (軽量モード)")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
     generated_at = jst_now().replace(microsecond=0).isoformat()
+
+    # バックフィル専用モード: 既存の銘柄マスタを使い、アーカイブだけ進める
+    if args.backfill_only:
+        valid_codes = None
+        try:
+            with open(os.path.join(args.out, "stocks.json"), encoding="utf-8") as f:
+                valid_codes = {s["code"] for s in json.load(f)}
+        except (OSError, ValueError):
+            log("stocks.json が読めないためコードフィルタなしでバックフィルします")
+        backfill_history(args.out, valid_codes, max_days=args.backfill_days)
+        return
 
     # 1) 銘柄マスタ (失敗したら致命的)
     stocks = fetch_stock_master()
@@ -532,6 +691,14 @@ def main():
     disclosures = [d for d in merged.values() if (d.get("published_at") or "") >= cutoff]
     disclosures.sort(key=lambda x: x["published_at"] or "", reverse=True)
     log(f"開示マージ: 新規{len(fetched_discs)}件 + 既存{len(existing_discs)}件 → {len(disclosures)}件")
+
+    # 開示アーカイブ: 直近取得分をマージし、過去方向へバックフィル
+    try:
+        merge_into_history(args.out, fetched_discs, set(stocks.keys()))
+        if args.backfill_days > 0:
+            backfill_history(args.out, set(stocks.keys()), max_days=args.backfill_days)
+    except Exception as e:  # noqa: BLE001
+        log(f"開示アーカイブの更新でエラー: {e}")
 
     # 書き出し (空データでの上書きはしない)
     write_json(os.path.join(args.out, "stocks.json"), sorted(stocks.values(), key=lambda s: s["code"]))

@@ -753,90 +753,76 @@ function chartSVG({ title, labels, series, unit }) {
     <div class="chart-legend">${legend}</div></div>`;
 }
 
-// ---- TDnet ミラーAPI (やのしん) から銘柄単位の開示履歴を取得 ----
-const YANOSHIN_LIST = "https://webapi.yanoshin.jp/webapi/tdnet/list/";
+// ---- 開示履歴アーカイブ (GitHub Actions が構築する静的シャードJSON) ----
+// data/history/{コード先頭1文字}.json に過去2年分の決算関連開示が入っている。
+// (以前はTDnetミラーAPIへのブラウザ直接アクセスだったが、CORS非対応かつ
+//  応答が遅く公開プロキシでも成立しないため、サーバ側で蓄積する方式に変更)
+const HIST_SHARD_CACHE = {};
 
-function classifyDocJs(title) {
-  if (title.includes("訂正") && title.includes("短信")) return "訂正決算短信";
-  if (title.includes("決算短信")) return "決算短信";
-  if (title.includes("業績予想")) return "業績予想修正";
-  if (title.includes("決算説明")) return "決算説明資料";
-  return null;
-}
-
-// やのしんAPIは CORS ヘッダを返さないため、直接 fetch が失敗した場合は
-// 公開CORSプロキシを順に試す (静的サイトからの取得を成立させるための措置)
-const CORS_PROXIES = [
-  (u) => "https://corsproxy.io/?url=" + encodeURIComponent(u),
-  (u) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
-];
-
-async function fetchJsonWithCors(url) {
-  const attempts = [url, ...CORS_PROXIES.map((p) => p(url))];
-  let lastErr = null;
-  for (const u of attempts) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 25000);
-      const res = await fetch(u, { mode: "cors", signal: controller.signal });
-      clearTimeout(timer);
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return await res.json();
-    } catch (e) {
-      lastErr = e;
+async function loadHistoryShard(prefix) {
+  if (HIST_SHARD_CACHE[prefix]) return HIST_SHARD_CACHE[prefix];
+  let shard = { codes: {} };
+  try {
+    const res = await fetch("data/history/" + encodeURIComponent(prefix) + ".json", { cache: "no-cache" });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.codes) shard = data;
     }
-  }
-  throw lastErr || new Error("取得できませんでした");
+  } catch (e) { /* アーカイブ未構築 */ }
+  HIST_SHARD_CACHE[prefix] = shard;
+  return shard;
 }
 
-async function fetchCompanyHistory(code, years) {
-  const url = `${YANOSHIN_LIST}${encodeURIComponent(code)}.json?limit=300`;
-  const data = await fetchJsonWithCors(url);
-  const cutoff = new Date();
-  cutoff.setFullYear(cutoff.getFullYear() - (years || 2));
-  const cutStr = cutoff.toISOString().slice(0, 10);
-  const items = [];
-  for (const it of ((data && data.items) || [])) {
-    const t = it.Tdnet || it;
-    const title = String(t.title || "");
-    const docType = classifyDocJs(title);
-    if (!docType) continue;
-    const pub = String(t.pubdate || "").replace(" ", "T");
-    if (!pub || pub.slice(0, 10) < cutStr) continue;
-    items.push({
-      key: String(t.id || pub + title.slice(0, 12)),
-      title,
-      doc_type: docType,
-      published_at: pub,
-      pdf_url: t.document_url || "",
-    });
-  }
-  items.sort((a, b) => (a.published_at > b.published_at ? -1 : 1));
-  return items;
+let _histStateCache = null;
+async function loadHistoryStateInfo() {
+  if (_histStateCache) return _histStateCache;
+  let st = {};
+  try {
+    const res = await fetch("data/history/state.json", { cache: "no-cache" });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && typeof data === "object") st = data;
+    }
+  } catch (e) { /* 未構築 */ }
+  _histStateCache = st;
+  return st;
+}
+
+async function fetchCompanyHistory(code) {
+  const shard = await loadHistoryShard(code[0]);
+  const rows = (shard.codes || {})[code] || [];
+  return rows.map((r) => ({
+    key: (r[0] || "") + "|" + String(r[2] || "").slice(0, 12),
+    published_at: r[0],
+    doc_type: r[1],
+    title: r[2],
+    pdf_url: r[3] || "",
+  }));
 }
 
 async function bulkFetchHistory(codes, statusEl) {
-  let done = 0, ok = 0;
+  let ok = 0, total = 0;
   const failed = [];
   for (const code of codes) {
-    if (statusEl) statusEl.textContent = `取得中… ${done + 1}/${codes.length} (${code})`;
+    if (statusEl) statusEl.textContent = `取得中… (${code})`;
     try {
-      const items = await fetchCompanyHistory(code, 2);
+      const items = await fetchCompanyHistory(code);
       analysisState.history[code] = {
         fetched_at: new Date().toISOString().slice(0, 19),
         items,
       };
       saveAnalysisState();
       ok++;
+      total += items.length;
     } catch (e) {
       failed.push(code);
     }
-    done++;
-    await new Promise((r) => setTimeout(r, 700));
   }
+  const st = await loadHistoryStateInfo();
+  const range = st.oldest ? ` (アーカイブ範囲: ${st.oldest}〜現在${st.complete ? "" : "、過去分を構築中"})` : "";
   const message = failed.length
-    ? `完了: ${ok}/${codes.length}銘柄を取得 (失敗: ${failed.join(", ")})`
-    : `完了: ${ok}銘柄の決算短信履歴(直近2年分)を取得しました`;
+    ? `完了: ${ok}/${codes.length}銘柄・${total}件を取得 (失敗: ${failed.join(", ")})${range}`
+    : `完了: ${ok}銘柄・${total}件の決算短信履歴を取得しました${range}`;
   if (statusEl) statusEl.textContent = message;
   return { ok, message };
 }
@@ -904,11 +890,11 @@ route("analysis", async (app, rest) => {
     <div class="card" style="margin-bottom:16px">
       <h2>📥 決算短信のまとめて取得（直近2年分）</h2>
       ${my.count ? `
-        <div class="meta-line">対象のマイ銘柄を選んで、TDnetミラー(やのしんWebAPI)から決算短信・訂正短信・業績予想修正・決算説明資料の履歴を取得します。</div>
+        <div class="meta-line">対象のマイ銘柄を選んで、開示アーカイブ(GitHub Actionsが定期構築)から決算短信・訂正短信・業績予想修正・決算説明資料の履歴を取得します。</div>
         <div class="checklist" id="an_checklist">${checkboxes}</div>
         <button class="btn" id="an_bulk">選択した銘柄の決算短信をまとめて取得</button>
         <div class="fetch-status" id="an_bulk_status"></div>
-        <div class="meta-line">※ TDnet本体の掲載期間(約1ヶ月)を過ぎた資料はPDFリンクが切れている場合があります(🔎でWeb検索できます)。取得結果はこのブラウザに保存されます。取得は公開CORSプロキシ経由になる場合があります。</div>
+        <div class="meta-line">※ TDnet本体の掲載期間(約1ヶ月)を過ぎた資料はPDF本体が削除されているため、タイトル表示となり 🔎 からWeb検索できます。アーカイブは過去2年分へ向けて自動構築中で、取得結果はこのブラウザに保存されます。</div>
       ` : '<div class="empty">マイ銘柄が未登録です。<a class="link" href="#/schedule">決算予定</a>から登録すると、まとめて取得できます。</div>'}
     </div>
     <div id="an_body">${code ? '<div class="loading">読み込み中…</div>' : '<div class="empty">銘柄を選択してください</div>'}</div>`;
@@ -963,9 +949,16 @@ async function renderAnalysisBody(code) {
       ${yoy == null ? "" : `<div class="meta-line" style="margin-top:2px">前期比 <span style="color:${yoy >= 0 ? "#4ade80" : "#f87171"}">${yoy >= 0 ? "+" : ""}${yoy.toFixed(1)}%</span></div>`}
     </div>`;
 
-  const hist = mergedHistory(code, stock.disclosures && stock.disclosures.length
-    ? stock.disclosures.map((d) => ({ key: String(d.id), title: d.title, doc_type: d.doc_type, published_at: d.published_at, pdf_url: d.pdf_url || "" }))
-    : []);
+  // アーカイブ(静的シャード)から履歴を読み込み、直近の開示データとマージ表示する
+  let shardItems = [];
+  try {
+    shardItems = await fetchCompanyHistory(code);
+  } catch (e) { /* アーカイブ未構築 */ }
+  const histState = await loadHistoryStateInfo();
+  const globalItems = (stock.disclosures || []).map((d) => (
+    { key: String(d.id), title: d.title, doc_type: d.doc_type, published_at: d.published_at, pdf_url: d.pdf_url || "" }
+  ));
+  const hist = mergedHistory(code, [...shardItems, ...globalItems]);
   const cachedInfo = analysisState.history[code];
   const comment = analysisState.comments[code] || "";
 
@@ -1003,6 +996,7 @@ async function renderAnalysisBody(code) {
       <div class="card">
         <h2>📄 決算短信・開示履歴 <span class="count">${hist.length}件</span>
           <span style="margin-left:auto"><button class="btn small ghost" id="an_fetch_one">この銘柄の2年分を取得</button></span></h2>
+        ${histState.oldest ? `<div class="meta-line">アーカイブ範囲: ${h(histState.oldest)} 〜 現在${histState.complete ? "" : " (過去2年分へ向けて構築中)"}</div>` : ""}
         ${cachedInfo ? `<div class="meta-line">履歴取得: ${fmtDateTime(cachedInfo.fetched_at)}</div>` : ""}
         <div class="fetch-status" id="an_one_status"></div>
         ${hist.length ? `<div class="table-wrap"><table>

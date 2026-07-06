@@ -46,5 +46,6 @@ jobs:
             echo "変更なし"
           else
             git commit -m "データ更新: 決算予定・決算短信 (自動)"
+            git pull --rebase origin main || true
             git push origin main
           fi
