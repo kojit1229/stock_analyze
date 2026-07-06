@@ -8,9 +8,9 @@
 
 **https://kojit1229.github.io/stock_analyze/**
 
-サーバ不要の**静的デモモード**で全機能（決算予定の絞り込み・マイ銘柄登録・決算短信の取得・PDF閲覧）が動作します。データはブラウザの localStorage に保存され、PDF はブラウザ内で生成されます。`main` へのpushで [GitHub Actions](.github/workflows/pages.yml) が自動デプロイします。
+サーバ不要の**静的デモモード**で全機能（決算予定の絞り込み・マイ銘柄登録・決算短信の取得・PDF閲覧）が動作します。データはブラウザの localStorage に保存され、PDF はブラウザ内で生成されます。
 
-> 初回は Actions の「Deploy to GitHub Pages」ワークフローが一度成功する必要があります（Pages設定は workflow が自動で有効化します）。
+このリポジトリの GitHub Pages は「ブランチ(`main`)からのデプロイ」で設定されており、`main` の内容がそのまま配信されます。リポジトリ直下の [`index.html`](index.html) は `frontend/index.html` へリダイレクトするだけのスタブで、実体は [`frontend/`](frontend) です（Pythonサーバモードと共通）。`.nojekyll` を置き、GitHub標準のJekyll処理（READMEの自動トップページ化など）を無効化しています。
 
 ## 特徴
 
