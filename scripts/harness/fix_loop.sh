@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 自動修正ループ (ハーネス)
+# 修正ループ (ハーネス) — 手動起動用: npm run fix
 #   ゲート実行 → 失敗ならログを Claude Code に渡して修正 → 再実行 … を繰り返す。
+#   修正の作法はプロジェクトスキル .claude/skills/stock-analyze-fix/SKILL.md に集約。
 #
 #   環境変数:
 #     MAX_ITER   最大反復回数 (既定 6)

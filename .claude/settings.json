@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run gate)",
+      "Bash(npm run fix)",
+      "Bash(npm install)",
+      "Bash(bash scripts/harness/gate.sh)",
+      "Bash(node scripts/check_local_api.mjs)",
+      "Bash(node scripts/smoke_ui.mjs)",
+      "Bash(node --check *)",
+      "Bash(python -m unittest *)"
+    ],
+    "deny": []
+  }
+}
