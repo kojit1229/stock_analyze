@@ -200,13 +200,21 @@
         key: String(d.key),
         code: d.code,
         title: d.title,
-        pdf_url: d.pdf_url || "",
+        pdf_url: directPdfUrl(d.pdf_url || ""),
         pdf_path: null,
         doc_type: d.doc_type || null,
         published_at: d.published_at || null,
         fetched_at: META.generated_at || loadTime,
       }));
     mode = "real";
+  }
+
+  // TDnetミラーのリダイレクタ (rd.php?<URL>) を剥がして直接URLにする。
+  // リダイレクタのサーバは応答が不安定で、iframe内のPDF表示が
+  // 真っ白のまま固まる原因になっていた。
+  function directPdfUrl(url) {
+    const m = /rd\.php\?(https?:\/\/.+)$/.exec(url || "");
+    return m ? m[1] : (url || "");
   }
 
   installSampleData();
