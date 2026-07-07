@@ -502,12 +502,17 @@ def yahoo_session():
 
 
 def fetch_market_caps(codes, s, crumb):
-    """Yahoo Finance のバッチ quote API から銘柄別時価総額(円)を取得する。
+    """Yahoo Finance のバッチ quote API から時価総額(円)と株価情報を取得する。
 
     /v7/finance/quote を100銘柄ずつ呼ぶ。失敗した銘柄・バッチはスキップし、
     取得できた分だけ返す。
+
+    戻り値: (caps, prices)
+      caps:   {code: 時価総額(円)}
+      prices: {code: [終値, 前日比%, 52週高値, 52週安値, 出来高, 平均出来高(3ヶ月)]}
     """
     caps = {}
+    prices = {}
     symbols = [c + ".T" for c in codes]
     batches = fails = 0
     for i in range(0, len(symbols), 100):
@@ -516,22 +521,37 @@ def fetch_market_caps(codes, s, crumb):
         try:
             r = s.get(YAHOO_QUOTE_URL, timeout=30, params={
                 "symbols": ",".join(chunk),
-                "fields": "marketCap",
+                "fields": "marketCap,regularMarketPrice,regularMarketChangePercent,"
+                          "fiftyTwoWeekHigh,fiftyTwoWeekLow,"
+                          "regularMarketVolume,averageDailyVolume3Month",
                 "crumb": crumb,
             })
             r.raise_for_status()
             for q in (r.json().get("quoteResponse", {}).get("result") or []):
                 sym = str(q.get("symbol", ""))
+                if not sym.endswith(".T"):
+                    continue
+                code = sym[:-2]
                 cap = q.get("marketCap")
-                if cap and sym.endswith(".T"):
-                    caps[sym[:-2]] = int(cap)
+                if cap:
+                    caps[code] = int(cap)
+                price = q.get("regularMarketPrice")
+                if price is not None:
+                    prices[code] = [
+                        price,
+                        q.get("regularMarketChangePercent"),
+                        q.get("fiftyTwoWeekHigh"),
+                        q.get("fiftyTwoWeekLow"),
+                        q.get("regularMarketVolume"),
+                        q.get("averageDailyVolume3Month"),
+                    ]
         except Exception as e:  # noqa: BLE001
             fails += 1
             if fails <= 3:
                 log(f"  Yahoo quote バッチ{batches}失敗: {type(e).__name__}: {e}")
         time.sleep(0.4)
-    log(f"時価総額: Yahoo Finance から {len(caps)}件 ({batches}バッチ中 失敗{fails})")
-    return caps
+    log(f"時価総額: Yahoo Finance から {len(caps)}件 / 株価 {len(prices)}件 ({batches}バッチ中 失敗{fails})")
+    return caps, prices
 
 
 # ---------------------------------------------------------------------------
@@ -816,14 +836,21 @@ def main():
     # 2) 時価総額 + 財務数値 (Yahoo Finance、ベストエフォート)
     ysession, ycrumb = yahoo_session()
     caps = {}
+    prices = {}
     if ysession:
         try:
-            caps = fetch_market_caps(sorted(stocks.keys()), ysession, ycrumb)
+            caps, prices = fetch_market_caps(sorted(stocks.keys()), ysession, ycrumb)
         except Exception as e:  # noqa: BLE001
             log(f"時価総額の取得でエラー: {e}")
     for code, cap in caps.items():
         if code in stocks:
             stocks[code]["market_cap"] = cap
+    if prices:
+        write_json(os.path.join(args.out, "prices.json"), {
+            "date": jst_now().strftime("%Y-%m-%d"),
+            "updated_at": generated_at,
+            "stocks": {c: v for c, v in prices.items() if c in stocks},
+        })
 
     fin_path = os.path.join(args.out, "financials.json")
     financials = {"stocks": {}}
@@ -904,10 +931,12 @@ def main():
             "disclosures": "TDnet (やのしんWebAPI)",
             "market_cap": "Yahoo Finance (取得できた銘柄のみ)",
             "financials": "Yahoo Finance (巡回取得)",
+            "prices": "Yahoo Finance (終値・前日比・52週高安・出来高)",
         },
         "counts": {
             "stocks": len(stocks),
             "market_caps": len(caps),
+            "prices": len(prices),
             "schedule": len(schedule),
             "disclosures": len(disclosures),
             "financials": fin_count,

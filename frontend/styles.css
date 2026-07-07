@@ -119,6 +119,7 @@ input, select, textarea {
   border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; width: 100%;
 }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+input[type="checkbox"] { width: auto; padding: 0; accent-color: var(--accent); }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
 .chip {
   padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border);

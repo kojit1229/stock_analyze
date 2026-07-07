@@ -144,6 +144,9 @@ async function render() {
   } catch (e) {
     app.innerHTML = `<div class="empty">エラー: ${h(e.message)}</div>`;
   }
+  // データ変更の可能性があるため、画面遷移のたびに自動バックアップを予約
+  // (有効時のみ。ハッシュ不変ならpushしない)
+  scheduleAutoBackup();
 }
 window.addEventListener("hashchange", render);
 
@@ -151,9 +154,15 @@ window.addEventListener("hashchange", render);
 // ホーム画面
 // ---------------------------------------------------------------------------
 route("home", async (app) => {
-  const d = await api.get("/home");
+  const [d, alertData] = await Promise.all([api.get("/home"), loadAlerts()]);
   const upcoming = d.registered_upcoming || [];
   const watch = d.watchlist || [];
+  // 直近7日のアラート
+  const ct = new Date();
+  ct.setDate(ct.getDate() - 7);
+  const pd = (n) => String(n).padStart(2, "0");
+  const cutoff = `${ct.getFullYear()}-${pd(ct.getMonth() + 1)}-${pd(ct.getDate())}`;
+  const alerts = (alertData.alerts || []).filter((a) => (a.date || "") >= cutoff).slice(0, 30);
   app.innerHTML = `
     <div class="page-head">
       <h1>ホーム</h1>
@@ -163,7 +172,22 @@ route("home", async (app) => {
       <div class="card stat"><div class="label">今日の決算予定</div><div class="value accent">${d.todays_count}</div></div>
       <div class="card stat"><div class="label">未確認の決算短信</div><div class="value warn">${d.unread_disclosures}</div></div>
       <div class="card stat"><div class="label">取得済み決算短信</div><div class="value ok">${d.fetched_total}</div></div>
-      <div class="card stat"><div class="label">登録銘柄の直近予定</div><div class="value">${upcoming.length}</div></div>
+      <div class="card stat"><div class="label">アラート (7日間)</div><div class="value ${alerts.length ? "warn" : ""}">${alerts.length}</div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <h2>🔔 アラート <span class="count">直近7日 ${alerts.length}件</span>
+        <a class="link" href="#/settings" style="margin-left:auto;font-size:12px">⚙ アラート設定 →</a></h2>
+      ${alerts.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>日付</th><th>コード</th><th>銘柄名</th><th>重要度</th><th>アラート</th><th>詳細</th></tr></thead>
+        <tbody>${alerts.map((a) => `<tr>
+          <td>${fmtDate(a.date)}</td>
+          <td class="code-cell"><a class="link" href="#/analysis/${h(a.code)}">${h(a.code)}</a></td>
+          <td>${h(a.name || "")}</td>
+          <td><span class="star">${stars(a.importance)}</span></td>
+          <td>${ALERT_ICONS[a.type] || "🔔"} ${h(a.title || "")}</td>
+          <td class="num">${h(a.detail || "")}</td></tr>`).join("")}
+        </tbody></table></div>` : `<div class="empty">アラートはありません。マイ銘柄の終値アラート (前日比変動・52週高安・出来高急増・決算前日/当日) は
+        <a class="link" href="#/settings">⚙ 設定</a>でgitへの自動バックアップを有効にすると、平日の引け後に自動チェックされます。</div>`}
     </div>
     <div class="grid cols-2">
       <div class="card">
@@ -216,6 +240,7 @@ function scheduleMiniTable(items) {
 const scheduleState = {
   date_range: "all", code: "", name: "", sector: "", market: "",
   cap_range: "", cap_min: "", cap_max: "", sort: "date", order: "asc",
+  mine: false, imp: "",
 };
 
 route("schedule", async (app) => {
@@ -227,6 +252,13 @@ route("schedule", async (app) => {
     <div class="chips" id="dateChips">
       ${[["all", "すべて"], ["today", "今日"], ["tomorrow", "明日"], ["this_week", "今週"], ["next_week", "来週"], ["month", "1ヶ月"]]
         .map(([k, l]) => `<span class="chip ${scheduleState.date_range === k ? "active" : ""}" data-range="${k}">${l}</span>`).join("")}
+      <span style="width:1px;background:var(--border);align-self:stretch;margin:0 4px"></span>
+      <span class="chip ${scheduleState.mine ? "active" : ""}" id="f_mine">⭐ マイ銘柄のみ</span>
+      <select id="f_imp" style="width:auto" title="マイ銘柄の重要度で絞り込み (未登録の銘柄は除外されます)">
+        <option value="">重要度: すべて</option>
+        ${[["5", "★5のみ"], ["4", "★4以上"], ["3", "★3以上"], ["2", "★2以上"], ["1", "★1以上"]]
+          .map(([k, l]) => `<option value="${k}" ${scheduleState.imp === k ? "selected" : ""}>${l}</option>`).join("")}
+      </select>
     </div>
     <div class="filters">
       <div class="field"><label>銘柄コード</label><input id="f_code" value="${h(scheduleState.code)}" placeholder="例: 7203"></div>
@@ -247,10 +279,21 @@ route("schedule", async (app) => {
   el("dateChips").addEventListener("click", (e) => {
     const c = e.target.closest(".chip");
     if (!c) return;
+    if (c.id === "f_mine") {
+      scheduleState.mine = !scheduleState.mine;
+      c.classList.toggle("active", scheduleState.mine);
+      loadSchedule();
+      return;
+    }
+    if (!c.dataset.range) return;
     scheduleState.date_range = c.dataset.range;
-    document.querySelectorAll("#dateChips .chip").forEach((x) => x.classList.toggle("active", x === c));
+    document.querySelectorAll("#dateChips .chip[data-range]").forEach((x) => x.classList.toggle("active", x === c));
     loadSchedule();
   });
+  el("f_imp").onchange = () => {
+    scheduleState.imp = el("f_imp").value;
+    loadSchedule();
+  };
   el("applyBtn").onclick = () => {
     scheduleState.code = el("f_code").value.trim();
     scheduleState.name = el("f_name").value.trim();
@@ -262,7 +305,7 @@ route("schedule", async (app) => {
     loadSchedule();
   };
   el("resetBtn").onclick = () => {
-    Object.assign(scheduleState, { code: "", name: "", sector: "", market: "", cap_range: "", cap_min: "", cap_max: "" });
+    Object.assign(scheduleState, { code: "", name: "", sector: "", market: "", cap_range: "", cap_min: "", cap_max: "", mine: false, imp: "" });
     render();
   };
   await loadSchedule();
@@ -283,10 +326,18 @@ async function loadSchedule() {
   if (scheduleState.cap_min !== "") q.set("cap_min", capParam(scheduleState.cap_min));
   if (scheduleState.cap_max !== "") q.set("cap_max", capParam(scheduleState.cap_max));
   const d = await api.get("/schedule?" + q.toString());
+  // マイ銘柄・重要度での絞り込み (サーバ/静的の両モード共通のクライアント側処理)
+  if (scheduleState.mine || scheduleState.imp) {
+    const my = await api.get("/mystocks");
+    const impBy = new Map((my.items || []).map((m) => [m.code, m.importance || 0]));
+    d.items = d.items.filter((s) => impBy.has(s.code) &&
+      (!scheduleState.imp || impBy.get(s.code) >= Number(scheduleState.imp)));
+    d.count = d.items.length;
+  }
   if (!box) return;
   const arrow = (col) => scheduleState.sort === col ? (scheduleState.order === "asc" ? " ▲" : " ▼") : "";
   box.innerHTML = `
-    <div class="page-head"><span class="sub">${d.count}件ヒット</span></div>
+    <div class="page-head"><span class="sub">${d.count}件ヒット${scheduleState.mine || scheduleState.imp ? " (マイ銘柄で絞り込み中)" : ""}</span></div>
     ${d.count === 0 ? '<div class="empty">条件に一致する決算予定はありません</div>' : `
     <div class="table-wrap"><table>
       <thead><tr>
@@ -335,21 +386,35 @@ function scheduleRow(s) {
 // マイ銘柄画面
 // ---------------------------------------------------------------------------
 route("mystocks", async (app) => {
-  const d = await api.get("/mystocks");
+  const [d, prices] = await Promise.all([api.get("/mystocks"), loadPrices()]);
+  const items = myState.imp
+    ? d.items.filter((s) => (s.importance || 0) >= Number(myState.imp))
+    : d.items;
+  const impChip = (k, l) =>
+    `<span class="chip ${myState.imp === k ? "active" : ""}" data-imp="${k}">${l}</span>`;
   app.innerHTML = `
-    <div class="page-head"><h1>マイ銘柄</h1><span class="sub">${d.count}件登録中</span>
+    <div class="page-head"><h1>マイ銘柄</h1><span class="sub">${d.count}件登録中${myState.imp ? ` / 表示${items.length}件` : ""}</span>
       <span style="margin-left:auto;display:inline-flex;gap:8px;align-items:center">
         <button class="btn small ghost" id="backupBtn" title="マイ銘柄・閲覧状態・分析コメント等をJSONファイルに保存">⬇ バックアップ</button>
         <button class="btn small ghost" id="restoreBtn" title="バックアップJSONから復元">⬆ 復元</button>
         <input type="file" id="restoreFile" accept=".json,application/json" style="display:none">
         <button class="fetch-btn" id="fetchMy">⟳ 決算短信を取得</button>
       </span></div>
-    <div class="meta-line" style="margin-bottom:12px">マイ銘柄・閲覧状態・分析コメントはこのブラウザにのみ保存されます。端末変更やキャッシュクリアに備えて、定期的にバックアップしてください。</div>
-    ${d.count === 0 ? '<div class="empty">まだ銘柄が登録されていません。<a class="link" href="#/schedule">決算予定一覧</a>から登録しましょう。</div>' : `
+    <div class="chips" id="impChips">
+      ${impChip("", "重要度: すべて")}${impChip("5", "★5のみ")}${impChip("4", "★4以上")}${impChip("3", "★3以上")}${impChip("2", "★2以上")}
+    </div>
+    <div class="meta-line" style="margin-bottom:12px">マイ銘柄・閲覧状態・分析コメントはこのブラウザにのみ保存されます。<a class="link" href="#/settings">⚙ 設定</a>からgitへの自動バックアップを有効にすると、端末を変えても復元でき、終値アラートのメール通知も使えます。</div>
+    ${items.length === 0 ? `<div class="empty">${d.count === 0 ? 'まだ銘柄が登録されていません。<a class="link" href="#/schedule">決算予定一覧</a>から登録しましょう。' : "この重要度のマイ銘柄はありません。"}</div>` : `
     <div class="table-wrap"><table>
-      <thead><tr><th>コード</th><th>銘柄名</th><th>保有区分</th><th>重要度</th><th>次回決算</th><th>取得状況</th><th>メモ</th><th>操作</th></tr></thead>
-      <tbody>${d.items.map(myStockRow).join("")}</tbody>
+      <thead><tr><th>コード</th><th>銘柄名</th><th>保有区分</th><th>重要度</th><th>終値${prices.date ? `<span class="badge market" style="margin-left:4px">${h(fmtDate(prices.date))}</span>` : ""}</th><th>前日比</th><th>次回決算</th><th>取得状況</th><th>メモ</th><th>操作</th></tr></thead>
+      <tbody>${items.map((s) => myStockRow(s, prices.stocks[s.code])).join("")}</tbody>
     </table></div>`}`;
+  el("impChips").addEventListener("click", (e) => {
+    const c = e.target.closest(".chip");
+    if (!c) return;
+    myState.imp = c.dataset.imp;
+    render();
+  });
   const fm = el("fetchMy");
   if (fm) fm.onclick = () => runFetch();
   el("backupBtn").onclick = downloadBackup;
@@ -363,13 +428,21 @@ route("mystocks", async (app) => {
   app.querySelectorAll("button[data-del]").forEach((b) => b.onclick = () => removeMyStock(b.dataset.del));
 });
 
-function myStockRow(s) {
+const myState = { imp: "" }; // マイ銘柄タブの重要度フィルタ (★n以上)
+
+function myStockRow(s, price) {
   const unread = s.unread_count ? ` <span class="badge unread">未読${s.unread_count}</span>` : "";
+  const close = price && price[0] != null
+    ? Number(price[0]).toLocaleString("en-US", { maximumFractionDigits: 1 }) + "円" : "-";
+  const chg = price && price[1] != null
+    ? `<span class="${price[1] >= 0 ? "pos" : "neg"}" style="color:${price[1] >= 0 ? "#4ade80" : "#f87171"}">${price[1] >= 0 ? "+" : ""}${Number(price[1]).toFixed(2)}%</span>` : "-";
   return `<tr>
     <td class="code-cell"><a class="link" href="#/stock/${h(s.code)}">${h(s.code)}</a></td>
     <td>${h(s.name)}</td>
     <td><span class="badge market">${h(s.holding_type || "")}</span></td>
     <td><span class="star">${stars(s.importance)}</span></td>
+    <td class="num">${close}</td>
+    <td class="num">${chg}</td>
     <td>${s.next_announce_date ? fmtDate(s.next_announce_date) + " " + h(s.next_fiscal_type || "") : "-"}</td>
     <td>${statusBadge(s.fetch_status)}${unread}</td>
     <td>${h(s.memo || "")}</td>
@@ -686,6 +759,34 @@ async function loadFinancials() {
   return _finCache;
 }
 
+let _priceCache = null;
+async function loadPrices() {
+  if (_priceCache) return _priceCache;
+  try {
+    const res = await fetch("data/prices.json", { cache: "no-cache" });
+    if (!res.ok) throw new Error(String(res.status));
+    const data = await res.json();
+    _priceCache = (data && data.stocks) ? data : { stocks: {} };
+  } catch (e) {
+    _priceCache = { stocks: {} };
+  }
+  return _priceCache;
+}
+
+let _alertCache = null;
+async function loadAlerts() {
+  if (_alertCache) return _alertCache;
+  try {
+    const res = await fetch("data/alerts.json", { cache: "no-cache" });
+    if (!res.ok) throw new Error(String(res.status));
+    const data = await res.json();
+    _alertCache = (data && Array.isArray(data.alerts)) ? data : { alerts: [] };
+  } catch (e) {
+    _alertCache = { alerts: [] };
+  }
+  return _alertCache;
+}
+
 const ANALYSIS_KEY = "kessan_analysis_v1";
 function loadAnalysisState() {
   try {
@@ -711,9 +812,10 @@ const BACKUP_KEYS = [
   "kessan_seen_v1",      // 新着判定の既知キー
   "kessan_analysis_v1",  // 分析コメント・取得済み履歴
   "kessan_compare_v1",   // 比較銘柄リスト
+  "kessan_settings_v1",  // アラート設定・自動バックアップ設定 (Actionsも参照)
 ];
 
-function downloadBackup() {
+function buildBackupPayload() {
   const payload = { app: "kessan-navi", version: 1, data: {} };
   for (const k of BACKUP_KEYS) {
     try {
@@ -724,6 +826,13 @@ function downloadBackup() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, "0");
   payload.exported_at = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  return payload;
+}
+
+function downloadBackup() {
+  const payload = buildBackupPayload();
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
   const blob = new Blob([JSON.stringify(payload, null, 1)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -733,6 +842,24 @@ function downloadBackup() {
   a.remove();
   URL.revokeObjectURL(a.href);
   toast("バックアップファイルをダウンロードしました");
+}
+
+function applyBackupPayload(payload) {
+  if (!payload || payload.app !== "kessan-navi" || !payload.data) {
+    toast("決算ナビのバックアップデータではありません", true);
+    return;
+  }
+  const keys = Object.keys(payload.data).filter((k) => BACKUP_KEYS.includes(k));
+  if (!keys.length) {
+    toast("復元できるデータがありません", true);
+    return;
+  }
+  if (!confirm(`バックアップ(${payload.exported_at || "日時不明"})から${keys.length}項目を復元します。現在のブラウザ内データは上書きされます。よろしいですか?`)) return;
+  for (const k of keys) {
+    try { localStorage.setItem(k, payload.data[k]); } catch (e) { /* 容量超過等 */ }
+  }
+  toast("復元しました。再読み込みします…");
+  setTimeout(() => location.reload(), 800);
 }
 
 function restoreBackup(file) {
@@ -745,24 +872,271 @@ function restoreBackup(file) {
       toast("バックアップファイルを読み込めません (JSONが不正)", true);
       return;
     }
-    if (!payload || payload.app !== "kessan-navi" || !payload.data) {
-      toast("決算ナビのバックアップファイルではありません", true);
-      return;
-    }
-    const keys = Object.keys(payload.data).filter((k) => BACKUP_KEYS.includes(k));
-    if (!keys.length) {
-      toast("復元できるデータがありません", true);
-      return;
-    }
-    if (!confirm(`バックアップ(${payload.exported_at || "日時不明"})から${keys.length}項目を復元します。現在のブラウザ内データは上書きされます。よろしいですか?`)) return;
-    for (const k of keys) {
-      try { localStorage.setItem(k, payload.data[k]); } catch (e) { /* 容量超過等 */ }
-    }
-    toast("復元しました。再読み込みします…");
-    setTimeout(() => location.reload(), 800);
+    applyBackupPayload(payload);
   };
   reader.readAsText(file);
 }
+
+// ---------------------------------------------------------------------------
+// 設定 (アラート条件・gitへの自動バックアップ)
+// ---------------------------------------------------------------------------
+const SETTINGS_KEY = "kessan_settings_v1";
+const GH_TOKEN_KEY = "kessan_gh_token_v1";      // トークンはバックアップに含めない
+const BACKUP_META_KEY = "kessan_backup_meta_v1"; // 最終push状態 (同じく含めない)
+const AUTO_BACKUP_MIN_MS = 10 * 60 * 1000;       // コミットのスパム防止 (最短10分)
+
+// scripts/generate_alerts.py の DEFAULT_SETTINGS と同じ既定値
+const ALERT_DEFAULT_LEVELS = {
+  "5": { price_move: 1, pct: 3, wk52: 1, volume: 1, vol_x: 2, earnings: 1 },
+  "4": { price_move: 1, pct: 3, wk52: 1, volume: 1, vol_x: 2, earnings: 1 },
+  "3": { price_move: 1, pct: 5, wk52: 0, volume: 0, vol_x: 2, earnings: 1 },
+  "2": { price_move: 0, pct: 5, wk52: 0, volume: 0, vol_x: 2, earnings: 1 },
+  "1": { price_move: 0, pct: 5, wk52: 0, volume: 0, vol_x: 2, earnings: 0 },
+};
+const ALERT_ICONS = { price_move: "📈", wk52_high: "🚀", wk52_low: "🔻", volume: "📊", earnings: "📅" };
+
+function loadAppSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY));
+    if (s && typeof s === "object") return s;
+  } catch (e) { /* 初期化 */ }
+  return {};
+}
+const appSettings = loadAppSettings();
+function saveAppSettings() {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(appSettings)); } catch (e) { /* 無視 */ }
+}
+
+function alertConf() {
+  const a = appSettings.alerts || {};
+  const levels = {};
+  for (const k of ["5", "4", "3", "2", "1"]) {
+    levels[k] = Object.assign({}, ALERT_DEFAULT_LEVELS[k], (a.levels || {})[k] || {});
+  }
+  return { email: a.email !== false, levels };
+}
+
+function ghToken() {
+  try { return localStorage.getItem(GH_TOKEN_KEY) || ""; } catch (e) { return ""; }
+}
+
+function repoInfo() {
+  // GitHub Pages ({owner}.github.io/{repo}/) から導出。ローカル実行時は既定値。
+  const m = /^([^.]+)\.github\.io$/.exec(location.hostname);
+  const seg = location.pathname.split("/").filter(Boolean);
+  if (m && seg.length) return { owner: m[1], repo: seg[0] };
+  return { owner: "kojit1229", repo: "stock_analyze" };
+}
+
+function strHash(s) {
+  let x = 5381;
+  for (let i = 0; i < s.length; i++) x = ((x * 33) ^ s.charCodeAt(i)) >>> 0;
+  return x.toString(36) + ":" + s.length;
+}
+
+function loadBackupMeta() {
+  try {
+    const m = JSON.parse(localStorage.getItem(BACKUP_META_KEY));
+    if (m && typeof m === "object") return m;
+  } catch (e) { /* 初期化 */ }
+  return {};
+}
+function saveBackupMeta(meta) {
+  try { localStorage.setItem(BACKUP_META_KEY, JSON.stringify(meta)); } catch (e) { /* 無視 */ }
+}
+
+// GitHub contents API で config/user_data.json へコミットする。
+// 成功: "pushed" / 変更なし: "unchanged" / 未設定: "no-token"
+async function pushBackupToGit(manual) {
+  const token = ghToken();
+  if (!token) return "no-token";
+  const body = JSON.stringify(buildBackupPayload(), null, 1);
+  const hash = strHash(body);
+  const meta = loadBackupMeta();
+  if (!manual && meta.hash === hash) return "unchanged";
+  const { owner, repo } = repoInfo();
+  const url = `https://api.github.com/repos/${owner}/${repo}/contents/config/user_data.json`;
+  const headers = { Authorization: "Bearer " + token, Accept: "application/vnd.github+json" };
+  let sha;
+  const g = await fetch(url + "?ref=main", { headers });
+  if (g.ok) sha = (await g.json()).sha;
+  else if (g.status !== 404) throw new Error("GitHub API " + g.status + " (トークンの権限を確認してください)");
+  const put = await fetch(url, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({
+      message: "backup: ユーザーデータの自動バックアップ",
+      content: btoa(unescape(encodeURIComponent(body))),
+      branch: "main",
+      sha,
+    }),
+  });
+  if (!put.ok) {
+    const err = await put.json().catch(() => ({}));
+    throw new Error("バックアップのpushに失敗: " + (err.message || put.status));
+  }
+  saveBackupMeta({ hash, at: buildBackupPayload().exported_at, atMs: Date.now() });
+  return "pushed";
+}
+
+let _abTimer = null;
+function scheduleAutoBackup() {
+  if (!(appSettings.autoBackup && appSettings.autoBackup.enabled)) return;
+  if (!ghToken()) return;
+  if (_abTimer) clearTimeout(_abTimer);
+  _abTimer = setTimeout(() => {
+    _abTimer = null;
+    const meta = loadBackupMeta();
+    if (meta.atMs && Date.now() - meta.atMs < AUTO_BACKUP_MIN_MS) return;
+    pushBackupToGit(false).then((r) => {
+      if (r === "pushed") toast("gitへ自動バックアップしました");
+    }).catch(() => { /* 自動実行なので静かに失敗 (設定画面から手動で確認可能) */ });
+  }, 5000);
+}
+
+async function restoreFromGit() {
+  let payload = null;
+  try {
+    const res = await fetch("../config/user_data.json", { cache: "no-cache" });
+    if (res.ok) payload = await res.json();
+  } catch (e) { /* フォールバックへ */ }
+  if (!payload) {
+    try {
+      const { owner, repo } = repoInfo();
+      const res = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}/contents/config/user_data.json?ref=main`,
+        { headers: { Accept: "application/vnd.github.raw+json" } });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      payload = await res.json();
+    } catch (e) {
+      toast("gitのバックアップを取得できません (まだ一度もバックアップされていない可能性): " + e.message, true);
+      return;
+    }
+  }
+  applyBackupPayload(payload);
+}
+
+route("settings", async (app) => {
+  const conf = alertConf();
+  const ab = appSettings.autoBackup || {};
+  const meta = loadBackupMeta();
+  const { owner, repo } = repoInfo();
+  const levelRow = (k) => {
+    const c = conf.levels[k];
+    return `<tr data-level="${k}">
+      <td style="white-space:nowrap"><span class="star">${stars(Number(k))}</span></td>
+      <td style="white-space:nowrap"><span style="display:inline-flex;align-items:center;gap:4px">
+        <input type="checkbox" data-k="price_move" ${c.price_move ? "checked" : ""}> ±
+        <input type="number" data-k="pct" value="${h(String(c.pct))}" min="0.5" step="0.5" style="width:64px"> %以上</span></td>
+      <td style="text-align:center"><input type="checkbox" data-k="wk52" ${c.wk52 ? "checked" : ""}></td>
+      <td style="white-space:nowrap"><span style="display:inline-flex;align-items:center;gap:4px">
+        <input type="checkbox" data-k="volume" ${c.volume ? "checked" : ""}> 平均の
+        <input type="number" data-k="vol_x" value="${h(String(c.vol_x))}" min="1" step="0.5" style="width:56px"> 倍以上</span></td>
+      <td style="text-align:center"><input type="checkbox" data-k="earnings" ${c.earnings ? "checked" : ""}></td>
+    </tr>`;
+  };
+  app.innerHTML = `
+    <div class="page-head"><h1>設定</h1><span class="sub">アラート条件とバックアップを設定します</span></div>
+
+    <div class="card" style="margin-bottom:14px">
+      <h2>🔔 終値アラート <span class="count">重要度ごとに設定</span></h2>
+      <div class="meta-line" style="margin-bottom:10px">
+        平日の引け後 (15:35以降のデータ更新時)、マイ銘柄の終値をチェックしてアラートを生成します。
+        アラートはホーム画面に表示され、メール通知ONの場合はGitHubのIssueが作成されて通知メールが届きます。<br>
+        <b>※ アラートを使うには、下の「gitへの自動バックアップ」を有効にしてください</b>
+        (GitHub Actionsがマイ銘柄と設定を読むため)。
+      </div>
+      <div class="table-wrap"><table id="alertTable">
+        <thead><tr><th>重要度</th><th>株価変動</th><th>52週高値/安値</th><th>出来高急増</th><th>決算前日/当日</th></tr></thead>
+        <tbody>${["5", "4", "3", "2", "1"].map(levelRow).join("")}</tbody>
+      </table></div>
+      <div style="margin-top:10px">
+        <label style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="alert_email" ${conf.email ? "checked" : ""}>
+          メール通知 (新規アラート発生時にGitHub Issueを作成し、@${h(owner)} へメンション → GitHubから通知メールが届きます)</label>
+      </div>
+      <div class="meta-line" style="margin-top:6px">メールが届かない場合は GitHub の Settings → Notifications で「Participating, @mentions」のEmail通知がONになっているか確認してください。</div>
+    </div>
+
+    <div class="card" style="margin-bottom:14px">
+      <h2>💾 gitへの自動バックアップ</h2>
+      <div class="meta-line" style="margin-bottom:10px">
+        マイ銘柄・閲覧状態・分析コメント・この設定を、リポジトリ <b>${h(owner)}/${h(repo)}</b> の
+        <code>config/user_data.json</code> へ自動コミットします (変更があったとき、最短10分間隔)。
+        端末変更やキャッシュクリア後も「gitから復元」で戻せます。
+      </div>
+      <div class="field" style="max-width:560px">
+        <label>GitHub トークン (Fine-grained PAT / このリポジトリの Contents: Read and write 権限のみ)</label>
+        <div style="display:flex;gap:6px">
+          <input type="password" id="gh_token" value="${h(ghToken())}" placeholder="github_pat_..." style="flex:1">
+          <button class="btn small" id="gh_token_save">保存</button>
+        </div>
+      </div>
+      <div class="meta-line" style="margin:6px 0 10px">
+        トークンは <a class="link" href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub設定 → Fine-grained tokens</a> で作成:
+        Repository access = Only select repositories (${h(repo)}) / Permissions = Contents: Read and write。
+        トークンはこのブラウザにのみ保存され、バックアップファイルには含まれません。
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="ab_enabled" ${ab.enabled ? "checked" : ""}> 自動バックアップを有効にする</label>
+        <button class="btn small" id="backupNow">今すぐバックアップ</button>
+        <button class="btn small ghost" id="restoreGit">gitから復元</button>
+        <span class="meta-line" id="ab_status" style="margin:0">${meta.at ? `最終バックアップ: ${h(meta.at)}` : "まだバックアップされていません"}</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>📥 ファイルへのバックアップ</h2>
+      <div class="meta-line">gitを使わない手動バックアップは<a class="link" href="#/mystocks">マイ銘柄</a>画面の「⬇ バックアップ / ⬆ 復元」から行えます。</div>
+    </div>`;
+
+  const collectAlerts = () => {
+    const levels = {};
+    app.querySelectorAll("#alertTable tbody tr").forEach((tr) => {
+      const k = tr.dataset.level;
+      const get = (name) => tr.querySelector(`[data-k="${name}"]`);
+      levels[k] = {
+        price_move: get("price_move").checked ? 1 : 0,
+        pct: Number(get("pct").value) || ALERT_DEFAULT_LEVELS[k].pct,
+        wk52: get("wk52").checked ? 1 : 0,
+        volume: get("volume").checked ? 1 : 0,
+        vol_x: Number(get("vol_x").value) || 2,
+        earnings: get("earnings").checked ? 1 : 0,
+      };
+    });
+    appSettings.alerts = { email: el("alert_email").checked, levels };
+    saveAppSettings();
+    toast("アラート設定を保存しました");
+  };
+  el("alertTable").addEventListener("change", collectAlerts);
+  el("alert_email").addEventListener("change", collectAlerts);
+
+  el("gh_token_save").onclick = () => {
+    try { localStorage.setItem(GH_TOKEN_KEY, el("gh_token").value.trim()); } catch (e) { /* 無視 */ }
+    toast("トークンを保存しました");
+  };
+  el("ab_enabled").onchange = () => {
+    appSettings.autoBackup = { enabled: el("ab_enabled").checked };
+    saveAppSettings();
+    if (el("ab_enabled").checked && !ghToken()) toast("トークンを登録すると自動バックアップが動き始めます", true);
+    else toast("自動バックアップ設定を保存しました");
+  };
+  el("backupNow").onclick = async () => {
+    el("backupNow").disabled = true;
+    try {
+      const r = await pushBackupToGit(true);
+      if (r === "no-token") toast("先にGitHubトークンを保存してください", true);
+      else {
+        toast("gitへバックアップしました");
+        el("ab_status").textContent = "最終バックアップ: " + (loadBackupMeta().at || "");
+      }
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      el("backupNow").disabled = false;
+    }
+  };
+  el("restoreGit").onclick = restoreFromGit;
+});
 
 const COMPARE_KEY = "kessan_compare_v1";
 function loadCompareCodes() {
