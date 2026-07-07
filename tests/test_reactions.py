@@ -19,14 +19,17 @@ def make_tail():
 
 class TestTail(unittest.TestCase):
     def test_append_and_trim(self):
+        import datetime
         tail = {"dates": [], "closes": {}}
-        for i in range(12):
-            d = f"2026-06-{i + 1:02d}"
+        n = tr.TAIL_DAYS + 4
+        base = datetime.date(2026, 5, 1)
+        for i in range(n):
+            d = (base + datetime.timedelta(days=i)).isoformat()
             tr.append_tail(tail, {"date": d, "stocks": {"7203": [100.0 + i, 0, None, None, None, None]}})
         self.assertEqual(len(tail["dates"]), tr.TAIL_DAYS)
-        self.assertEqual(tail["dates"][-1], "2026-06-12")
+        self.assertEqual(tail["dates"][-1], (base + datetime.timedelta(days=n - 1)).isoformat())
         self.assertEqual(len(tail["closes"]["7203"]), tr.TAIL_DAYS)
-        self.assertEqual(tail["closes"]["7203"][-1], 111.0)
+        self.assertEqual(tail["closes"]["7203"][-1], 100.0 + n - 1)
 
     def test_same_day_overwrite(self):
         tail = {"dates": [], "closes": {}}
