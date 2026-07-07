@@ -226,7 +226,12 @@ def main():
     disclosures = load_json(os.path.join(args.data, "disclosures.json"), [])
 
     out_path = os.path.join(args.data, "reactions.json")
-    data = load_json(out_path, {})
+    data = load_json(out_path, None)
+    if data is None and os.path.exists(out_path) and os.path.getsize(out_path) > 2:
+        # 壊れたファイルを空データで上書きすると蓄積した終値履歴が消えるため中止
+        log("reactions.json の読み込みに失敗 (破損の可能性)。上書きを避けるため処理を中止します")
+        return
+    data = data or {}
     tail = data.get("tail") or {"dates": [], "closes": {}}
     events = data.get("events") or []
 

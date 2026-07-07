@@ -90,7 +90,8 @@ def compute_stats(stocks, prices, reactions, schedule, disclosures, today):
             "sector": s.get("sector", ""), "cap": cap,
             "close": close, "chg": chg, "hi": hi, "lo": lo, "vol": vol, "avg": avg,
             "value": close * vol if close is not None and vol is not None else None,
-            "impact": cap - cap / (1 + chg / 100) if cap and chg is not None else None,
+            "impact": (cap - cap / (1 + chg / 100)
+                       if cap and chg is not None and chg > -100 else None),
         })
     with_chg = [r for r in rows if r["chg"] is not None]
     up = sum(1 for r in with_chg if r["chg"] > 0.0001)
@@ -344,7 +345,12 @@ def main():
 
     # index.json: 日付一覧 + 主要指標の時系列 (推移チャート用)
     idx_path = os.path.join(out_dir, "index.json")
-    idx = load_json(idx_path, {})
+    idx = load_json(idx_path, None)
+    if idx is None and os.path.exists(idx_path) and os.path.getsize(idx_path) > 2:
+        # 壊れたindexを空で上書きすると時系列の蓄積が消えるため、indexの更新のみ中止
+        log("index.json の読み込みに失敗 (破損の可能性)。時系列の上書きを避けるため index 更新をスキップします")
+        return
+    idx = idx or {}
     series = {r[0]: r for r in (idx.get("series") or []) if isinstance(r, list) and r}
     s = stats["summary"]
     series[date] = [date, s["up"], s["down"],

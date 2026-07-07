@@ -96,6 +96,12 @@ function markLocalMode() {
   }
 }
 
+function todayISO() {
+  const t = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())}`;
+}
+
 function fmtDate(d) {
   if (!d) return "-";
   const dt = new Date(d.length <= 10 ? d + "T00:00:00" : d);
@@ -288,8 +294,8 @@ route("schedule", async (app) => {
         ${sectors.sectors.map((s) => `<option ${scheduleState.sector === s ? "selected" : ""}>${h(s)}</option>`).join("")}</select></div>
       <div class="field"><label>時価総額レンジ</label><select id="f_cap"><option value="">すべて</option>
         ${caps.ranges.map((r) => `<option value="${r.key}" ${scheduleState.cap_range === r.key ? "selected" : ""}>${h(r.label)}</option>`).join("")}</select></div>
-      <div class="field"><label>任意レンジ 下限(億円)</label><input id="f_capmin" type="number" value="${scheduleState.cap_min}" placeholder="例: 100"></div>
-      <div class="field"><label>任意レンジ 上限(億円)</label><input id="f_capmax" type="number" value="${scheduleState.cap_max}" placeholder="例: 3000"></div>
+      <div class="field"><label>任意レンジ 下限(億円)</label><input id="f_capmin" type="number" value="${h(scheduleState.cap_min)}" placeholder="例: 100"></div>
+      <div class="field"><label>任意レンジ 上限(億円)</label><input id="f_capmax" type="number" value="${h(scheduleState.cap_max)}" placeholder="例: 3000"></div>
       <div class="field" style="justify-content:flex-end"><label>&nbsp;</label>
         <div style="display:flex;gap:6px"><button class="btn" id="applyBtn">検索</button><button class="btn ghost" id="resetBtn">クリア</button></div></div>
     </div>
@@ -701,17 +707,17 @@ async function disclosureDetail(app, id) {
   const localPdf = findArchivedPdf(await loadPdfIndex(), d.code, d.published_at);
   const downloadLink = !hasPdf ? ""
     : api.local
-      ? `<a class="btn small ghost" href="${pdfUrl}" ${isExternal ? 'target="_blank" rel="noopener"' : `download="${h(d.pdf_path || d.code + ".pdf")}"`}>⬇ ダウンロード</a>`
-      : `<a class="btn small ghost" href="${pdfUrl}?download=1">⬇ ダウンロード</a>`;
+      ? `<a class="btn small ghost" href="${h(pdfUrl)}" ${isExternal ? 'target="_blank" rel="noopener"' : `download="${h(d.pdf_path || d.code + ".pdf")}"`}>⬇ ダウンロード</a>`
+      : `<a class="btn small ghost" href="${h(pdfUrl)}?download=1">⬇ ダウンロード</a>`;
   // 外部PDF (TDnet) はサイト側の制約で埋め込み表示できない場合があるため、
   // 開くボタンを主動線にし、埋め込みはベストエフォートとする
   const viewer = localPdf
     ? `<div class="pdf-toolbar">
          <span class="badge ok">📌 リポジトリ保存済み</span>
-         <a class="btn" href="${localPdf}" target="_blank" rel="noopener">📄 PDFを開く（保存版）</a>
-         ${isExternal ? `<a class="btn small ghost" href="${pdfUrl}" target="_blank" rel="noopener">TDnet版を開く</a>` : ""}
+         <a class="btn" href="${h(localPdf)}" target="_blank" rel="noopener">📄 PDFを開く（保存版）</a>
+         ${isExternal ? `<a class="btn small ghost" href="${h(pdfUrl)}" target="_blank" rel="noopener">TDnet版を開く</a>` : ""}
        </div>
-       <iframe class="pdf-frame" src="${localPdf}" title="PDF"></iframe>
+       <iframe class="pdf-frame" src="${h(localPdf)}" title="PDF"></iframe>
        <div class="meta-line">このPDFはリポジトリに恒久保存されたものです。TDnetの掲載期間後も閲覧できます。</div>`
     : !hasPdf
     ? `<div class="empty">この資料のPDFはTDnetの掲載期間(約1ヶ月)を過ぎたため取得できません。<br>
@@ -719,20 +725,20 @@ async function disclosureDetail(app, id) {
             href="https://www.google.com/search?q=${encodeURIComponent((d.title || "").slice(0, 60) + " PDF")}">🔎 Webで検索する</a></div>`
     : isExternal
       ? `<div class="pdf-toolbar">
-           <a class="btn" href="${pdfUrl}" target="_blank" rel="noopener">📄 PDFを開く（TDnet）</a>
+           <a class="btn" href="${h(pdfUrl)}" target="_blank" rel="noopener">📄 PDFを開く（TDnet）</a>
            ${downloadLink}
          </div>
-         <iframe class="pdf-frame" src="${pdfUrl}" title="PDF"></iframe>
+         <iframe class="pdf-frame" src="${h(pdfUrl)}" title="PDF"></iframe>
          <div class="meta-line">PDFはTDnet(適時開示情報閲覧サービス)のものです。上の枠に表示されない場合は「📄 PDFを開く」で新しいタブで開いてください。</div>`
       : `<div class="pdf-toolbar">
-           <a class="btn small" href="${pdfUrl}" target="_blank">🔍 外部ブラウザで開く</a>
+           <a class="btn small" href="${h(pdfUrl)}" target="_blank">🔍 外部ブラウザで開く</a>
            ${downloadLink}
          </div>
-         <iframe class="pdf-frame" src="${pdfUrl}" title="PDF"></iframe>`;
+         <iframe class="pdf-frame" src="${h(pdfUrl)}" title="PDF"></iframe>`;
   app.innerHTML = `
     <a class="back-link" href="#/disclosures">← 決算短信一覧へ戻る</a>
     <div class="page-head"><h1>${h(d.title)}</h1></div>
-    <div class="grid cols-2" style="grid-template-columns:2fr 1fr">
+    <div class="grid split-21">
       <div class="card">
         ${viewer}
       </div>
@@ -772,7 +778,7 @@ async function disclosureDetail(app, id) {
 route("stock", async (app, rest) => {
   const code = rest[0];
   const d = await api.get("/stocks/" + code);
-  const nextSched = (d.schedules || []).find((s) => s.announce_date >= new Date().toISOString().slice(0, 10));
+  const nextSched = (d.schedules || []).find((s) => s.announce_date >= todayISO());
   app.innerHTML = `
     <a class="back-link" href="#/schedule">← 決算予定一覧へ戻る</a>
     <div class="detail-head">
@@ -1608,7 +1614,7 @@ function historyRow(it) {
     return (Date.now() - new Date(y, mo - 1, dd).getTime()) < 40 * 86400e3;
   })();
   const corr = it.doc_type && it.doc_type.startsWith("訂正") ? "warn" : "market";
-  const searchQ = encodeURIComponent(it.title.slice(0, 60) + " PDF");
+  const searchQ = encodeURIComponent((it.title || "").slice(0, 60) + " PDF");
   const link = it._local
     ? `<a class="link" href="${h(it._local)}" target="_blank" rel="noopener">${h(it.title)}</a> <span class="badge ok" title="リポジトリに恒久保存済み">📌保存済</span>`
     : it.pdf_url
@@ -1711,6 +1717,9 @@ async function renderAnalysisBody(code) {
   const cachedInfo = analysisState.history[code];
   const comment = analysisState.comments[code] || "";
 
+  // 読み込み中に別画面へ遷移した場合は描画しない (DOMが差し替わっている)
+  if (!body.isConnected) return;
+
   body.innerHTML = `
     <div class="detail-head" style="margin-bottom:12px">
       <span class="code">${h(stock.code)}</span><span class="name">${h(stock.name)}</span>
@@ -1748,7 +1757,7 @@ async function renderAnalysisBody(code) {
       ${performanceTableHtml(rows, analysisView.mode)}
       <div class="meta-line">出典: Yahoo Finance (年次は直近${(fin.a || []).length}期 / 四半期は取得できる範囲)。単位: 円。PER・PSRは時価総額と直近通期実績からの概算。</div>
     </div>
-    <div class="grid cols-2" style="grid-template-columns:3fr 2fr">
+    <div class="grid split-32">
       <div class="card">
         <h2>📄 決算短信・開示履歴 <span class="count">${hist.length}件</span>
           <span style="margin-left:auto"><button class="btn small ghost" id="an_fetch_one">この銘柄の2年分を取得</button></span></h2>
@@ -2068,7 +2077,7 @@ function computeMarketStats(stocks, prices, reactions, sched, discs) {
       code: s.code, name: s.name, market: s.market || "", sector: s.sector || "",
       cap: s.market_cap || null, close, chg, hi, lo, vol, avg,
       value: close != null && vol != null ? close * vol : null,
-      impact: s.market_cap && chg != null ? s.market_cap - s.market_cap / (1 + chg / 100) : null,
+      impact: s.market_cap && chg != null && chg > -100 ? s.market_cap - s.market_cap / (1 + chg / 100) : null,
     });
   }
   const withChg = rows.filter((r) => r.chg != null);
@@ -2246,14 +2255,14 @@ function renderMarketHtml(st) {
       <div style="font-size:13px;line-height:1.9">${h(st.comment)}</div>
     </div>` : ""}
 
-    <div class="grid cols-4" style="margin-bottom:12px;grid-template-columns:repeat(5,1fr)">
+    <div class="grid cols-5" style="margin-bottom:12px">
       ${stat("値上がり / 値下がり", `<span style="color:#4ade80">${num(s.up)}</span> / <span style="color:#f87171">${num(s.down)}</span>`, `変わらず ${num(s.flat)} / 全${num(s.total)}銘柄`)}
       ${stat("平均騰落率 (単純)", chgSpan(s.avg), "全銘柄の単純平均")}
       ${stat("平均騰落率 (加重)", chgSpan(s.wavg), "時価総額加重 (大型株の影響大)")}
       ${stat(`騰落レシオ (${s.ratio_days || "-"}日)`, s.ratio == null ? "蓄積中" : s.ratio.toFixed(0) + "%", ratioJudge)}
       ${stat("急騰 / 急落 (±8%)", `<span style="color:#4ade80">${num(s.surge)}</span> / <span style="color:#f87171">${num(s.plunge)}</span>`, "銘柄数")}
     </div>
-    <div class="grid cols-4" style="margin-bottom:16px;grid-template-columns:repeat(5,1fr)">
+    <div class="grid cols-5" style="margin-bottom:16px">
       ${stat("概算売買代金", fmtOku(s.value_total), "終値×出来高の合計")}
       ${stat("時価総額合計", fmtOku(s.cap_total), `前日比 <span style="color:${(s.cap_change || 0) >= 0 ? "#4ade80" : "#f87171"}">${(s.cap_change || 0) >= 0 ? "+" : ""}${fmtOku(s.cap_change)}</span>`)}
       ${stat("上昇 / 下落業種", `<span style="color:#4ade80">${num(s.sectors_up)}</span> / <span style="color:#f87171">${num(s.sectors_down)}</span>`, "東証33業種")}
@@ -2434,7 +2443,7 @@ function analysisInsightHtml(stock, fin, price) {
       <h2>🔎 決算シグナル <span class="count">(直近通期 ${last ? h(periodLabel(last[0])) + "期" : ""} vs 前期)</span></h2>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${sigHtml}</div>
     </div>
-    <div class="grid cols-4" style="margin-bottom:14px;grid-template-columns:repeat(5,1fr)">
+    <div class="grid cols-5" style="margin-bottom:14px">
       ${kv("PER (概算)", per == null ? "-" : per.toFixed(1) + "倍")}
       ${kv("PSR (概算)", psr == null ? "-" : psr.toFixed(2) + "倍")}
       ${kv("純利益率", nim == null ? "-" : nim.toFixed(1) + "%")}
@@ -2500,7 +2509,7 @@ function progressHtml(fin) {
   return `
     <div class="card" style="margin-bottom:14px">
       <h2>⏱ 決算進捗 <span class="count">第${p.n}四半期累計 ÷ 前期通期 (概算)</span></h2>
-      <div class="grid cols-4" style="grid-template-columns:repeat(3,1fr)">${p.rows.map(cell).join("")}</div>
+      <div class="grid cols-3">${p.rows.map(cell).join("")}</div>
       <div class="meta-line">会社予想は取得していないため「前期通期に対する消化率」を前年同時点と比較しています。+3pt以上で「先行」、-3pt以下で「遅れ」。季節性 (上期偏重など) はこの比較で吸収されます。</div>
     </div>`;
 }
@@ -2641,7 +2650,7 @@ function financialHealthHtml(stock, fin) {
     ncHtml = `
     <div class="card" style="margin-bottom:14px">
       <h2>💰 ネットキャッシュ比率 <span class="count">清原式 (${h(periodLabel(lastB[0]))}期末)</span></h2>
-      <div class="grid cols-4" style="grid-template-columns:repeat(3,1fr);margin-bottom:8px">
+      <div class="grid cols-3" style="margin-bottom:8px">
         <div class="card stat" style="background:var(--bg-elev)"><div class="label">ネットキャッシュ</div>
           <div class="value" style="font-size:20px;color:${nc.netCash >= 0 ? "#4ade80" : "#f87171"}">${fmtMoney(nc.netCash)}</div></div>
         <div class="card stat" style="background:var(--bg-elev)"><div class="label">ネットキャッシュ比率 (÷時価総額)</div>
@@ -2764,7 +2773,7 @@ async function renderCompareBody() {
     return `<td class="${v >= 0 ? "pos" : "neg"}">${v >= 0 ? "+" : ""}${v.toFixed(1)}%</td>`;
   }).join("");
   const nextSched = (s) => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     const n = (s.schedules || []).find((x) => x.announce_date >= today);
     return n ? `${fmtDate(n.announce_date)} ${h(n.fiscal_type || "")}` : "-";
   };
