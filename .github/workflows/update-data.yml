@@ -30,6 +30,9 @@ jobs:
         run: pip install requests pandas xlrd openpyxl
       - name: Fetch real data (JPX / TDnet / Yahoo)
         run: python scripts/fetch_real_data.py --out frontend/data
+      - name: Track price reactions (イベント→株価反応の記録)
+        continue-on-error: true
+        run: python scripts/track_reactions.py --data frontend/data
       - name: Generate price alerts (マイ銘柄の終値アラート)
         continue-on-error: true
         env:

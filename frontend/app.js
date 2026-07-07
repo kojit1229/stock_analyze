@@ -184,9 +184,9 @@ route("home", async (app) => {
           <td class="code-cell"><a class="link" href="#/analysis/${h(a.code)}">${h(a.code)}</a></td>
           <td>${h(a.name || "")}</td>
           <td><span class="star">${stars(a.importance)}</span></td>
-          <td>${ALERT_ICONS[a.type] || "🔔"} ${h(a.title || "")}</td>
+          <td>${alertIcon(a.type)} ${h(a.title || "")}</td>
           <td class="num">${h(a.detail || "")}</td></tr>`).join("")}
-        </tbody></table></div>` : `<div class="empty">アラートはありません。マイ銘柄の終値アラート (前日比変動・52週高安・出来高急増・決算前日/当日) は
+        </tbody></table></div>` : `<div class="empty">アラートはありません。マイ銘柄の終値アラート (前日比変動・52週高安・出来高急増・決算前日/当日・重要開示・3日連続続落/続伸・決算への反応) は
         <a class="link" href="#/settings">⚙ 設定</a>でgitへの自動バックアップを有効にすると、平日の引け後に自動チェックされます。</div>`}
     </div>
     <div class="grid cols-2">
@@ -773,6 +773,20 @@ async function loadPrices() {
   return _priceCache;
 }
 
+let _reactCache = null;
+async function loadReactions() {
+  if (_reactCache) return _reactCache;
+  try {
+    const res = await fetch("data/reactions.json", { cache: "no-cache" });
+    if (!res.ok) throw new Error(String(res.status));
+    const data = await res.json();
+    _reactCache = (data && Array.isArray(data.events)) ? data : { events: [], tail: { dates: [], closes: {} } };
+  } catch (e) {
+    _reactCache = { events: [], tail: { dates: [], closes: {} } };
+  }
+  return _reactCache;
+}
+
 let _alertCache = null;
 async function loadAlerts() {
   if (_alertCache) return _alertCache;
@@ -887,13 +901,20 @@ const AUTO_BACKUP_MIN_MS = 10 * 60 * 1000;       // コミットのスパム防�
 
 // scripts/generate_alerts.py の DEFAULT_SETTINGS と同じ既定値
 const ALERT_DEFAULT_LEVELS = {
-  "5": { price_move: 1, pct: 3, wk52: 1, volume: 1, vol_x: 2, earnings: 1 },
-  "4": { price_move: 1, pct: 3, wk52: 1, volume: 1, vol_x: 2, earnings: 1 },
-  "3": { price_move: 1, pct: 5, wk52: 0, volume: 0, vol_x: 2, earnings: 1 },
-  "2": { price_move: 0, pct: 5, wk52: 0, volume: 0, vol_x: 2, earnings: 1 },
-  "1": { price_move: 0, pct: 5, wk52: 0, volume: 0, vol_x: 2, earnings: 0 },
+  "5": { price_move: 1, pct: 3, wk52: 1, volume: 1, vol_x: 2, earnings: 1, disclosure: 1, streak: 1, reaction: 1, rpct: 5 },
+  "4": { price_move: 1, pct: 3, wk52: 1, volume: 1, vol_x: 2, earnings: 1, disclosure: 1, streak: 1, reaction: 1, rpct: 5 },
+  "3": { price_move: 1, pct: 5, wk52: 0, volume: 0, vol_x: 2, earnings: 1, disclosure: 1, streak: 0, reaction: 1, rpct: 5 },
+  "2": { price_move: 0, pct: 5, wk52: 0, volume: 0, vol_x: 2, earnings: 1, disclosure: 1, streak: 0, reaction: 0, rpct: 5 },
+  "1": { price_move: 0, pct: 5, wk52: 0, volume: 0, vol_x: 2, earnings: 0, disclosure: 0, streak: 0, reaction: 0, rpct: 5 },
 };
-const ALERT_ICONS = { price_move: "📈", wk52_high: "🚀", wk52_low: "🔻", volume: "📊", earnings: "📅" };
+const ALERT_ICONS = {
+  price_move: "📈", wk52_high: "🚀", wk52_low: "🔻", volume: "📊", earnings: "📅",
+  streak_down: "📉", streak_up: "📈", reaction: "🎯",
+};
+function alertIcon(t) {
+  if (t && t.indexOf("disclosure") === 0) return "📢";
+  return ALERT_ICONS[t] || "🔔";
+}
 
 function loadAppSettings() {
   try {
@@ -1033,6 +1054,11 @@ route("settings", async (app) => {
         <input type="checkbox" data-k="volume" ${c.volume ? "checked" : ""}> 平均の
         <input type="number" data-k="vol_x" value="${h(String(c.vol_x))}" min="1" step="0.5" style="width:56px"> 倍以上</span></td>
       <td style="text-align:center"><input type="checkbox" data-k="earnings" ${c.earnings ? "checked" : ""}></td>
+      <td style="text-align:center"><input type="checkbox" data-k="disclosure" ${c.disclosure ? "checked" : ""}></td>
+      <td style="text-align:center"><input type="checkbox" data-k="streak" ${c.streak ? "checked" : ""}></td>
+      <td style="white-space:nowrap"><span style="display:inline-flex;align-items:center;gap:4px">
+        <input type="checkbox" data-k="reaction" ${c.reaction ? "checked" : ""}> ±
+        <input type="number" data-k="rpct" value="${h(String(c.rpct))}" min="1" step="0.5" style="width:56px"> %以上</span></td>
     </tr>`;
   };
   app.innerHTML = `
@@ -1047,7 +1073,7 @@ route("settings", async (app) => {
         (GitHub Actionsがマイ銘柄と設定を読むため)。
       </div>
       <div class="table-wrap"><table id="alertTable">
-        <thead><tr><th>重要度</th><th>株価変動</th><th>52週高値/安値</th><th>出来高急増</th><th>決算前日/当日</th></tr></thead>
+        <thead><tr><th>重要度</th><th>株価変動</th><th>52週高値/安値</th><th>出来高急増</th><th>決算前日/当日</th><th title="業績予想修正・配当予想修正・自己株式取得・訂正決算短信の開示">重要開示</th><th title="終値ベースで3日以上の連続下落/連続上昇">3日連続±</th><th title="決算発表の当日/翌営業日に閾値以上動いたとき">決算反応</th></tr></thead>
         <tbody>${["5", "4", "3", "2", "1"].map(levelRow).join("")}</tbody>
       </table></div>
       <div style="margin-top:10px">
@@ -1101,6 +1127,10 @@ route("settings", async (app) => {
         volume: get("volume").checked ? 1 : 0,
         vol_x: Number(get("vol_x").value) || 2,
         earnings: get("earnings").checked ? 1 : 0,
+        disclosure: get("disclosure").checked ? 1 : 0,
+        streak: get("streak").checked ? 1 : 0,
+        reaction: get("reaction").checked ? 1 : 0,
+        rpct: Number(get("rpct").value) || 5,
       };
     });
     appSettings.alerts = { email: el("alert_email").checked, levels };
@@ -1532,8 +1562,9 @@ async function renderAnalysisBody(code) {
     body.innerHTML = `<div class="empty">エラー: ${h(e.message)}</div>`;
     return;
   }
-  const findata = await loadFinancials();
-  const metaInfo = await loadMetaInfo();
+  const [findata, metaInfo, pricesData, reactions] = await Promise.all([
+    loadFinancials(), loadMetaInfo(), loadPrices(), loadReactions(),
+  ]);
   const finGot = Object.keys(findata.stocks || {}).filter((c) => {
     const v = findata.stocks[c];
     return v && ((v.a && v.a.length) || (v.q && v.q.length));
@@ -1589,8 +1620,10 @@ async function renderAnalysisBody(code) {
     </div>` : `<div class="card" style="margin-bottom:14px"><div class="empty">この銘柄の財務数値(売上高・利益など)はまだ取得されていません。<br>
       全${finTotal ? finTotal.toLocaleString("en-US") : ""}銘柄をコード順に自動巡回中です(取得済み: ${finGot.toLocaleString("en-US")}銘柄・毎時拡大)。<br>
       取得され次第、ここに指標と推移チャートが表示されます。</div></div>`}
-    ${last ? analysisInsightHtml(stock, fin) : ""}
+    ${last ? analysisInsightHtml(stock, fin, pricesData.stocks[code]) : ""}
+    ${last ? progressHtml(fin) : ""}
     ${financialHealthHtml(stock, fin)}
+    ${reactionHtml(code, reactions)}
     <div class="card" style="margin-bottom:14px">
       <h2>📊 決算数値の推移
         <span style="margin-left:auto;display:inline-flex;gap:6px">
@@ -1702,15 +1735,195 @@ route("compare", async (app) => {
   await renderCompareBody();
 });
 
+// ---------------------------------------------------------------------------
+// スクリーナー (全銘柄を指標で絞り込み・ランキング)
+// ---------------------------------------------------------------------------
+const screenerState = {
+  market: "", capMin: "", capMax: "", perMax: "", ncMin: "",
+  roeMin: "", eqMin: "", cagrMin: "", divMin: "", sort: "nc", order: "desc",
+};
+
+const SCREENER_PRESETS = [
+  { key: "kiyohara", label: "💰 清原式割安", desc: "ネットキャッシュ比率50%以上 × PER10倍以下",
+    set: { ncMin: "50", perMax: "10", sort: "nc", order: "desc" } },
+  { key: "growth", label: "🚀 高成長", desc: "売上CAGR(3年)15%以上",
+    set: { cagrMin: "15", sort: "cagr", order: "desc" } },
+  { key: "quality", label: "✨ 高ROE割安", desc: "ROE12%以上 × PER12倍以下",
+    set: { roeMin: "12", perMax: "12", sort: "roe", order: "desc" } },
+  { key: "income", label: "🪙 健全×高配当", desc: "自己資本比率50%以上 × 配当利回り3.5%以上",
+    set: { eqMin: "50", divMin: "3.5", sort: "div", order: "desc" } },
+];
+
+let _scrRows = null;
+async function buildScreenerRows() {
+  if (_scrRows) return _scrRows;
+  let stocks = null;
+  try {
+    const res = await fetch("data/stocks.json", { cache: "no-cache" });
+    if (res.ok) stocks = await res.json();
+  } catch (e) { /* 実データなし */ }
+  if (!Array.isArray(stocks) || !stocks.length) return null;
+  const [findata, prices] = await Promise.all([loadFinancials(), loadPrices()]);
+  const rows = [];
+  for (const s of stocks) {
+    const fin = findata.stocks[s.code] || {};
+    const a = fin.a || [], b = fin.b || [];
+    const la = a[a.length - 1], lb = b[b.length - 1];
+    const cap = s.market_cap || null;
+    const ni = la && la[3], rev = la && la[1];
+    const nc = netCashInfo(lb, cap);
+    const eq = lb && lb[2] != null && lb[4] != null ? lb[2] - lb[4] : null;
+    const yrs = Math.min(3, a.length - 1);
+    const p = prices.stocks[s.code];
+    rows.push({
+      code: s.code, name: s.name, market: s.market || "", sector: s.sector || "",
+      cap,
+      per: cap && ni > 0 ? cap / ni : null,
+      psr: cap && rev > 0 ? cap / rev : null,
+      nc: nc && nc.ratio != null ? nc.ratio : null,
+      eqR: lb && lb[2] > 0 && eq != null ? (eq / lb[2]) * 100 : null,
+      roe: ni != null && eq > 0 ? (ni / eq) * 100 : null,
+      cagr: yrs >= 2 && la ? cagrPct(a[a.length - 1 - yrs][1], la[1], yrs) : null,
+      div: p && p[6] != null ? p[6] : null,
+      chg: p && p[1] != null ? p[1] : null,
+    });
+  }
+  _scrRows = rows;
+  return rows;
+}
+
+route("screener", async (app) => {
+  const markets = await api.get("/markets");
+  const st = screenerState;
+  const field = (id, label, ph) => `<div class="field"><label>${label}</label>
+    <input id="${id}" type="number" step="any" value="${h(String(st[id.slice(4)] || ""))}" placeholder="${ph}"></div>`;
+  app.innerHTML = `
+    <div class="page-head"><h1>スクリーナー</h1><span class="sub">全銘柄を財務指標で絞り込み・ランキングします</span></div>
+    <div class="chips" id="scrPresets">
+      ${SCREENER_PRESETS.map((p) => `<span class="chip" data-preset="${p.key}" title="${h(p.desc)}">${p.label}</span>`).join("")}
+      <span class="chip" data-preset="" title="条件をクリア">クリア</span>
+    </div>
+    <div class="filters">
+      <div class="field"><label>市場区分</label><select id="scr_market"><option value="">すべて</option>
+        ${markets.markets.map((m) => `<option ${st.market === m ? "selected" : ""}>${h(m)}</option>`).join("")}</select></div>
+      ${field("scr_capMin", "時価総額 下限(億円)", "例: 50")}
+      ${field("scr_capMax", "時価総額 上限(億円)", "例: 1000")}
+      ${field("scr_perMax", "PER 上限(倍)", "例: 10")}
+      ${field("scr_ncMin", "ネットキャッシュ比率 下限(%)", "例: 50")}
+      ${field("scr_roeMin", "ROE 下限(%)", "例: 12")}
+      ${field("scr_eqMin", "自己資本比率 下限(%)", "例: 50")}
+      ${field("scr_cagrMin", "売上CAGR 下限(%)", "例: 15")}
+      ${field("scr_divMin", "配当利回り 下限(%)", "例: 3.5")}
+      <div class="field" style="justify-content:flex-end"><label>&nbsp;</label>
+        <button class="btn" id="scr_apply">絞り込む</button></div>
+    </div>
+    <div id="scr_result"><div class="loading">読み込み中…</div></div>`;
+
+  const collect = () => {
+    st.market = el("scr_market").value;
+    for (const k of ["capMin", "capMax", "perMax", "ncMin", "roeMin", "eqMin", "cagrMin", "divMin"]) {
+      st[k] = el("scr_" + k).value.trim();
+    }
+  };
+  el("scr_apply").onclick = () => { collect(); renderScreenerResult(); };
+  el("scrPresets").addEventListener("click", (e) => {
+    const c = e.target.closest(".chip");
+    if (!c) return;
+    Object.assign(st, { market: "", capMin: "", capMax: "", perMax: "", ncMin: "",
+      roeMin: "", eqMin: "", cagrMin: "", divMin: "", sort: "nc", order: "desc" });
+    const preset = SCREENER_PRESETS.find((p) => p.key === c.dataset.preset);
+    if (preset) Object.assign(st, preset.set);
+    render();
+  });
+  await renderScreenerResult();
+});
+
+async function renderScreenerResult() {
+  const box = el("scr_result");
+  if (!box) return;
+  box.innerHTML = '<div class="loading">計算中…</div>';
+  const rows = await buildScreenerRows();
+  if (!box.isConnected) return;
+  if (!rows) {
+    box.innerHTML = '<div class="empty">スクリーナーは実データ (frontend/data/) がある環境で利用できます。</div>';
+    return;
+  }
+  const st = screenerState;
+  const num = (v) => (v === "" || v == null ? null : Number(v));
+  const capMin = num(st.capMin) != null ? num(st.capMin) * 1e8 : null;
+  const capMax = num(st.capMax) != null ? num(st.capMax) * 1e8 : null;
+  const perMax = num(st.perMax), ncMin = num(st.ncMin), roeMin = num(st.roeMin);
+  const eqMin = num(st.eqMin), cagrMin = num(st.cagrMin), divMin = num(st.divMin);
+  let items = rows.filter((r) =>
+    (!st.market || r.market === st.market) &&
+    (capMin == null || (r.cap != null && r.cap >= capMin)) &&
+    (capMax == null || (r.cap != null && r.cap <= capMax)) &&
+    (perMax == null || (r.per != null && r.per <= perMax)) &&
+    (ncMin == null || (r.nc != null && r.nc >= ncMin)) &&
+    (roeMin == null || (r.roe != null && r.roe >= roeMin)) &&
+    (eqMin == null || (r.eqR != null && r.eqR >= eqMin)) &&
+    (cagrMin == null || (r.cagr != null && r.cagr >= cagrMin)) &&
+    (divMin == null || (r.div != null && r.div >= divMin)));
+  const dir = st.order === "asc" ? 1 : -1;
+  items.sort((x, y) => {
+    const a = x[st.sort], b = y[st.sort];
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;
+    if (b == null) return -1;
+    return (a - b) * dir;
+  });
+  const total = items.length;
+  items = items.slice(0, 300);
+  const arrow = (col) => st.sort === col ? (st.order === "asc" ? " ▲" : " ▼") : "";
+  const pctTd = (v, goodTh) => v == null ? '<td class="num">-</td>'
+    : `<td class="num ${goodTh != null && v >= goodTh ? "pos" : ""}">${v.toFixed(1)}%</td>`;
+  const chgTd = (v) => v == null ? '<td class="num">-</td>'
+    : `<td class="num ${v >= 0 ? "pos" : "neg"}">${v >= 0 ? "+" : ""}${v.toFixed(2)}%</td>`;
+  box.innerHTML = `
+    <div class="page-head"><span class="sub">${total.toLocaleString("en-US")}件ヒット${total > 300 ? " (上位300件を表示)" : ""}</span></div>
+    ${total === 0 ? '<div class="empty">条件に一致する銘柄はありません</div>' : `
+    <div class="table-wrap"><table>
+      <thead><tr>
+        <th class="no-sort">コード</th><th class="no-sort">銘柄名</th><th class="no-sort">市場</th>
+        <th data-sort="cap">時価総額${arrow("cap")}</th>
+        <th data-sort="per">PER${arrow("per")}</th>
+        <th data-sort="psr">PSR${arrow("psr")}</th>
+        <th data-sort="nc" title="ネットキャッシュ比率 (清原式)">NC比率${arrow("nc")}</th>
+        <th data-sort="eqR">自己資本${arrow("eqR")}</th>
+        <th data-sort="roe">ROE${arrow("roe")}</th>
+        <th data-sort="cagr">売上CAGR${arrow("cagr")}</th>
+        <th data-sort="div">配当${arrow("div")}</th>
+        <th data-sort="chg">前日比${arrow("chg")}</th>
+      </tr></thead>
+      <tbody>${items.map((r) => `<tr>
+        <td class="code-cell"><a class="link" href="#/analysis/${h(r.code)}">${h(r.code)}</a></td>
+        <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h(r.name)} / ${h(r.sector)}">${h(r.name)}</td>
+        <td><span class="badge market">${h(r.market)}</span></td>
+        <td class="num">${r.cap != null ? fmtMoney(r.cap) : "-"}</td>
+        <td class="num">${r.per != null ? r.per.toFixed(1) + "倍" : "-"}</td>
+        <td class="num">${r.psr != null ? r.psr.toFixed(2) + "倍" : "-"}</td>
+        ${pctTd(r.nc, 50)}${pctTd(r.eqR)}${pctTd(r.roe, 12)}${pctTd(r.cagr, 15)}
+        <td class="num">${r.div != null ? r.div.toFixed(2) + "%" : "-"}</td>
+        ${chgTd(r.chg)}
+      </tr>`).join("")}</tbody>
+    </table></div>
+    <div class="meta-line" style="margin-top:8px">PER・PSR・ROE・NC比率は直近通期実績と最新時価総額からの概算。財務データ (BS) 未取得の銘柄は該当指標が「-」となり、指標フィルタ指定時は除外されます。銘柄コードから銘柄分析へ移動できます。</div>`}`;
+  box.querySelectorAll("th[data-sort]").forEach((th) => {
+    th.onclick = () => {
+      const col = th.dataset.sort;
+      if (st.sort === col) st.order = st.order === "asc" ? "desc" : "asc";
+      else { st.sort = col; st.order = "desc"; }
+      renderScreenerResult();
+    };
+  });
+}
+
 // 決算シグナル + 投資指標カード (銘柄分析タブ)
-function analysisInsightHtml(stock, fin) {
+function analysisInsightHtml(stock, fin, price) {
   const a = fin.a || [];
   const n = a.length;
   const last = a[n - 1];
   const signals = buildSignals(a);
-  const sigHtml = signals.length
-    ? signals.map((s) => `<span class="badge ${s.good ? "ok" : "unread"}" style="font-size:12px;padding:4px 12px">${h(s.label)}</span>`).join(" ")
-    : '<span class="meta-line">判定に必要な期数が不足しています</span>';
 
   const rev = last && last[1], op = last && last[2], ni = last && last[3];
   const cap = stock.market_cap;
@@ -1720,6 +1933,23 @@ function analysisInsightHtml(stock, fin) {
   const yrs = Math.min(3, n - 1);
   const revCagr = yrs >= 2 ? cagrPct(a[n - 1 - yrs][1], last[1], yrs) : null;
   const opCagr = yrs >= 2 ? cagrPct(a[n - 1 - yrs][2], last[2], yrs) : null;
+
+  // ROE・ROA (BS) と利益の質 (営業CF vs 純利益)
+  const b = fin.b || [], c = fin.c || [];
+  const lastB = b[b.length - 1], lastC = c[c.length - 1];
+  const eq = lastB && lastB[2] != null && lastB[4] != null ? lastB[2] - lastB[4] : null;
+  const roe = ni != null && eq > 0 ? (ni / eq) * 100 : null;
+  const roa = ni != null && lastB && lastB[2] > 0 ? (ni / lastB[2]) * 100 : null;
+  const ocf = lastC && lastC[1];
+  const cfRatio = ni > 0 && ocf != null ? ocf / ni : null;
+  if (ni > 0 && ocf != null && ocf < ni * 0.5) {
+    signals.push({ label: ocf < 0 ? "営業CFが赤字 (利益の質に注意)" : "営業CF < 純利益の半分 (利益の質に注意)", good: false });
+  }
+  const divY = price && price[6] != null ? price[6] : null;
+
+  const sigHtml = signals.length
+    ? signals.map((s) => `<span class="badge ${s.good ? "ok" : "unread"}" style="font-size:12px;padding:4px 12px">${h(s.label)}</span>`).join(" ")
+    : '<span class="meta-line">判定に必要な期数が不足しています</span>';
   const kv = (label, v) => `<div class="card stat"><div class="label">${label}</div><div class="value" style="font-size:18px">${v}</div></div>`;
   const pct = (v) => (v == null ? "-" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%");
 
@@ -1734,6 +1964,109 @@ function analysisInsightHtml(stock, fin) {
       ${kv("純利益率", nim == null ? "-" : nim.toFixed(1) + "%")}
       ${kv(`売上CAGR (${yrs}年)`, pct(revCagr))}
       ${kv(`営業利益CAGR (${yrs}年)`, pct(opCagr))}
+      ${kv("ROE", roe == null ? "-" : roe.toFixed(1) + "%")}
+      ${kv("ROA", roa == null ? "-" : roa.toFixed(1) + "%")}
+      ${kv("配当利回り", divY == null ? "-" : divY.toFixed(2) + "%")}
+      ${kv("営業CF ÷ 純利益", cfRatio == null ? "-" : cfRatio.toFixed(2) + "倍")}
+      ${kv("自己資本比率", lastB && lastB[2] > 0 && eq != null ? ((eq / lastB[2]) * 100).toFixed(1) + "%" : "-")}
+    </div>`;
+}
+
+// ---- 決算進捗率 (季節性調整つき・概算) ----
+// 会社予想データは無いため「対 前期通期」の消化率を、前年同時点の消化率と比較する。
+function progressInfo(fin) {
+  const a = fin.a || [], q = fin.q || [];
+  if (a.length < 2 || !q.length) return null;
+  const lastA = a[a.length - 1], prevA = a[a.length - 2];
+  const curQ = q.filter((r) => r[0] > lastA[0]);            // 今期の四半期
+  const n = curQ.length;
+  if (!n) return null;
+  const prevQ = q.filter((r) => r[0] > prevA[0] && r[0] <= lastA[0]).slice(0, n); // 前年同時点
+  const metric = (idx, label) => {
+    const sum = (rows) => {
+      let s = 0;
+      for (const r of rows) {
+        if (r[idx] == null) return null;
+        s += r[idx];
+      }
+      return s;
+    };
+    const cur = sum(curQ), base = lastA[idx];
+    if (cur == null || base == null || base <= 0) return null;
+    const curPct = (cur / base) * 100;
+    let prevPct = null;
+    if (prevQ.length === n) {
+      const pcum = sum(prevQ), pbase = prevA[idx];
+      if (pcum != null && pbase != null && pbase > 0) prevPct = (pcum / pbase) * 100;
+    }
+    return { label, curPct, prevPct, diff: prevPct == null ? null : curPct - prevPct };
+  };
+  const rows = [metric(1, "売上高"), metric(2, "営業利益"), metric(3, "純利益")].filter(Boolean);
+  return rows.length ? { n, rows } : null;
+}
+
+function progressHtml(fin) {
+  const p = progressInfo(fin);
+  if (!p) return "";
+  const cell = (m) => {
+    let badge = "";
+    if (m.diff != null) {
+      const cls = m.diff >= 3 ? "ok" : m.diff <= -3 ? "unread" : "market";
+      const word = m.diff >= 3 ? "先行" : m.diff <= -3 ? "遅れ" : "例年並み";
+      badge = `<span class="badge ${cls}" style="margin-left:6px">${word} ${m.diff >= 0 ? "+" : ""}${m.diff.toFixed(1)}pt</span>`;
+    }
+    return `<div class="card stat" style="background:var(--bg-elev)">
+      <div class="label">${h(m.label)}の進捗</div>
+      <div class="value" style="font-size:20px">${m.curPct.toFixed(1)}%${badge}</div>
+      <div class="meta-line" style="margin-top:2px">前年同時点 ${m.prevPct == null ? "-" : m.prevPct.toFixed(1) + "%"}</div>
+    </div>`;
+  };
+  return `
+    <div class="card" style="margin-bottom:14px">
+      <h2>⏱ 決算進捗 <span class="count">第${p.n}四半期累計 ÷ 前期通期 (概算)</span></h2>
+      <div class="grid cols-4" style="grid-template-columns:repeat(3,1fr)">${p.rows.map(cell).join("")}</div>
+      <div class="meta-line">会社予想は取得していないため「前期通期に対する消化率」を前年同時点と比較しています。+3pt以上で「先行」、-3pt以下で「遅れ」。季節性 (上期偏重など) はこの比較で吸収されます。</div>
+    </div>`;
+}
+
+// ---- イベントと株価反応 (reactions.json) ----
+function reactionHtml(code, reactions) {
+  const evs = (reactions.events || []).filter((e) => e.code === code);
+  if (!evs.length) {
+    return `<div class="card" style="margin-bottom:14px">
+      <h2>🎯 イベントと株価反応</h2>
+      <div class="empty">まだ記録がありません。決算発表・業績修正などの開示や急変動が発生すると、当日と翌営業日の株価反応がここに蓄積されていきます (毎営業日の引け後に自動記録)。</div>
+    </div>`;
+  }
+  const pctCell = (v) => v == null ? '<td class="num">記録待ち</td>'
+    : `<td class="num ${v >= 0 ? "pos" : "neg"}">${v >= 0 ? "+" : ""}${v.toFixed(1)}%</td>`;
+  const rows = evs.slice(0, 15).map((e) => `<tr>
+    <td>${fmtDate(e.d)}</td>
+    <td><span class="badge market">${h(e.t)}</span></td>
+    <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h(e.l || "")}">${h(e.l || "")}</td>
+    ${pctCell(e.c1)}${pctCell(e.c2)}
+  </tr>`).join("");
+  // 決算発表への反応の平均 (記録があるもののみ)
+  const earn = evs.filter((e) => (e.t === "決算短信" || e.t === "訂正決算短信") && e.c1 != null);
+  let summary = "";
+  if (earn.length) {
+    const avg = (key) => {
+      const vs = earn.map((e) => e[key]).filter((v) => v != null);
+      return vs.length ? vs.reduce((s, v) => s + v, 0) / vs.length : null;
+    };
+    const a1 = avg("c1"), a2 = avg("c2");
+    const f = (v) => v == null ? "-" : `<span style="color:${v >= 0 ? "#4ade80" : "#f87171"}">${v >= 0 ? "+" : ""}${v.toFixed(1)}%</span>`;
+    summary = `<div class="meta-line" style="margin-bottom:8px">この銘柄の決算発表への平均反応 (${earn.length}回): 当日 ${f(a1)} / 翌営業日 ${f(a2)} — 好決算でも売られる癖などの参考に。</div>`;
+  }
+  return `
+    <div class="card" style="margin-bottom:14px">
+      <h2>🎯 イベントと株価反応 <span class="count">${evs.length}件記録</span></h2>
+      ${summary}
+      <div class="table-wrap"><table>
+        <thead><tr><th>反応日</th><th>イベント</th><th>内容</th><th>当日</th><th>翌営業日</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <div class="meta-line">15時以降の開示は翌営業日を「当日」として扱います。株価イベント (急変動・52週高安・出来高急増) は全銘柄で記録し、開示イベントは決算短信・業績予想修正・配当予想修正・自己株式取得を対象にしています。</div>
     </div>`;
 }
 
@@ -1926,12 +2259,13 @@ async function renderCompareBody() {
     body.innerHTML = '<div class="empty">比較する銘柄を追加してください (マイ銘柄からのクイック追加、またはコード入力)</div>';
     return;
   }
-  const findata = await loadFinancials();
+  const [findata, pricesData] = await Promise.all([loadFinancials(), loadPrices()]);
   const stocks = [];
   for (const c of compareCodes) {
     try {
       const s = await api.get("/stocks/" + encodeURIComponent(c));
       s._fin = findata.stocks[c] || { a: [], q: [] };
+      s._price = pricesData.stocks[c] || null;
       stocks.push(s);
     } catch (e) { /* 除外 */ }
   }
@@ -1984,6 +2318,13 @@ async function renderCompareBody() {
       if (!b || b[2] == null || b[4] == null || b[2] <= 0) return "-";
       return (((b[2] - b[4]) / b[2]) * 100).toFixed(1) + "%";
     })}</tr>
+    <tr><td class="metric-name">ROE</td>${cell((s) => {
+      const l = lastA(s), b = lastB(s);
+      const eq = b && b[2] != null && b[4] != null ? b[2] - b[4] : null;
+      return l && l[3] != null && eq > 0 ? ((l[3] / eq) * 100).toFixed(1) + "%" : "-";
+    })}</tr>
+    <tr><td class="metric-name">配当利回り</td>${cell((s) =>
+      s._price && s._price[6] != null ? s._price[6].toFixed(2) + "%" : "-")}</tr>
     <tr><td class="metric-name">次回決算予定</td>${cell(nextSched)}</tr>
     <tr><td class="metric-name">分析コメント</td>${cell((s) => {
       const c = analysisState.comments[s.code];

@@ -111,6 +111,54 @@ class TestGenerate(unittest.TestCase):
         b = dict(a, title="違うタイトル")
         self.assertEqual(ga.alert_key(a), ga.alert_key(b))
 
+    def test_disclosure_alert(self):
+        discs = [
+            {"code": "1301", "doc_type": "業績予想修正", "title": "業績予想の修正に関するお知らせ",
+             "published_at": "2026-07-07T15:00:00"},
+            {"code": "1301", "doc_type": "自己株式取得", "title": "自己株式の取得に係る事項の決定",
+             "published_at": "2026-07-07T15:00:00"},
+            {"code": "1301", "doc_type": "決算説明資料", "title": "説明資料",  # 対象外
+             "published_at": "2026-07-07T15:00:00"},
+            {"code": "1301", "doc_type": "業績予想修正", "title": "昨日の修正",  # 日付違い
+             "published_at": "2026-07-06T15:00:00"},
+        ]
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3}], None,
+                          "2026-07-07", disclosures=discs)
+        types = sorted(a["type"] for a in out if a["type"].startswith("disclosure"))
+        self.assertEqual(types, ["disclosure_業績予想修正", "disclosure_自己株式取得"])
+        # 重要度1は既定で開示アラート無効
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 1}], None,
+                          "2026-07-07", disclosures=discs)
+        self.assertEqual([a for a in out if a["type"].startswith("disclosure")], [])
+
+    def test_streak_alert(self):
+        reactions = {"tail": {"dates": ["d1", "d2", "d3", "d4"],
+                              "closes": {"1301": [500.0, 480.0, 460.0, 440.0],
+                                         "7203": [100.0, 110.0, 105.0, 120.0]}},
+                     "events": []}
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 5},
+                                       {"code": "7203", "importance": 5}], None,
+                          "2026-07-07", reactions=reactions)
+        st = {a["code"]: a for a in out if a["type"].startswith("streak")}
+        self.assertIn("1301", st)
+        self.assertEqual(st["1301"]["type"], "streak_down")
+        self.assertIn("3日続落", st["1301"]["title"])
+        self.assertNotIn("7203", st)  # 連続していない
+
+    def test_reaction_alert(self):
+        reactions = {"tail": {"dates": [], "closes": {}}, "events": [
+            {"d": "2026-07-07", "code": "1301", "t": "決算短信", "l": "", "c1": -8.2, "c2": None, "nd": None},
+            {"d": "2026-07-04", "code": "7203", "t": "決算短信", "l": "", "c1": 1.0, "c2": 6.3, "nd": "2026-07-07"},
+            {"d": "2026-07-04", "code": "6506", "t": "急変動", "l": "", "c1": 9.0, "c2": 9.9, "nd": "2026-07-07"},
+        ]}
+        my = [{"code": c, "importance": 5} for c in ("1301", "7203", "6506")]
+        out = ga.generate({"date": "2026-07-07", "stocks": {}}, [], my, None,
+                          "2026-07-07", reactions=reactions)
+        r = {a["code"]: a["title"] for a in out if a["type"] == "reaction"}
+        self.assertIn("決算反応 -8.2%", r.get("1301", ""))
+        self.assertIn("決算翌日 +6.3%", r.get("7203", ""))
+        self.assertNotIn("6506", r)  # 急変動イベントは決算反応の対象外
+
 
 if __name__ == "__main__":
     unittest.main()
