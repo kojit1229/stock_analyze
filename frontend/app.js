@@ -154,9 +154,27 @@ window.addEventListener("hashchange", render);
 // ホーム画面
 // ---------------------------------------------------------------------------
 route("home", async (app) => {
-  const [d, alertData] = await Promise.all([api.get("/home"), loadAlerts()]);
+  const [d, alertData, myList, pricesData] = await Promise.all([
+    api.get("/home"), loadAlerts(), api.get("/mystocks"), loadPrices(),
+  ]);
   const upcoming = d.registered_upcoming || [];
   const watch = d.watchlist || [];
+  // マイ銘柄の本日サマリ
+  let mySummary = "";
+  {
+    const chgs = (myList.items || [])
+      .map((m) => pricesData.stocks[m.code])
+      .filter((p) => p && p[1] != null)
+      .map((p) => p[1]);
+    if (chgs.length) {
+      const avg = chgs.reduce((s, v) => s + v, 0) / chgs.length;
+      const u = chgs.filter((v) => v > 0.0001).length;
+      const dn = chgs.filter((v) => v < -0.0001).length;
+      mySummary = `<div class="meta-line" style="margin-bottom:8px">マイ銘柄の本日 (${chgs.length}銘柄): 平均
+        <span style="color:${avg >= 0 ? "#4ade80" : "#f87171"};font-weight:700">${avg >= 0 ? "+" : ""}${avg.toFixed(2)}%</span>
+        (上昇 ${u} / 下落 ${dn} / 変わらず ${chgs.length - u - dn}) — 市場全体は<a class="link" href="#/market">市況タブ</a>へ</div>`;
+    }
+  }
   // 直近7日のアラート
   const ct = new Date();
   ct.setDate(ct.getDate() - 7);
@@ -177,6 +195,7 @@ route("home", async (app) => {
     <div class="card" style="margin-bottom:16px">
       <h2>🔔 アラート <span class="count">直近7日 ${alerts.length}件</span>
         <a class="link" href="#/settings" style="margin-left:auto;font-size:12px">⚙ アラート設定 →</a></h2>
+      ${mySummary}
       ${alerts.length ? `<div class="table-wrap"><table>
         <thead><tr><th>日付</th><th>コード</th><th>銘柄名</th><th>重要度</th><th>アラート</th><th>詳細</th></tr></thead>
         <tbody>${alerts.map((a) => `<tr>
@@ -471,14 +490,34 @@ route("disclosures", async (app, rest) => {
   if (disclosureState.filter === "mine") qp.set("mine", "1");
   if (disclosureState.cap) qp.set("cap_range", disclosureState.cap);
   const qs = qp.toString();
-  const [d, caps] = await Promise.all([
+  const [d, caps, my] = await Promise.all([
     api.get("/disclosures" + (qs ? "?" + qs : "")),
     api.get("/cap-ranges"),
+    api.get("/mystocks"),
   ]);
   const chip = (key, label) =>
     `<span class="chip ${disclosureState.filter === key ? "active" : ""}" data-filter="${key}">${label}</span>`;
+  const checkboxes = my.items.map((m) =>
+    `<label><input type="checkbox" value="${h(m.code)}" checked> ${h(m.code)} ${h(m.name)}</label>`).join("");
   app.innerHTML = `
     <div class="page-head"><h1>決算短信</h1><span class="sub">${d.count}件</span></div>
+    <div class="card" style="margin-bottom:14px">
+      <h2>📥 決算短信のまとめて取得・GitHubへのPDF保存</h2>
+      ${my.count ? `
+        <div class="meta-line">対象のマイ銘柄を選んで実行します。</div>
+        <div class="checklist" id="disc_checklist">${checkboxes}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <button class="btn" id="disc_bulk" title="開示アーカイブから過去2年分の決算短信・修正・説明資料の履歴を取得し、銘柄分析タブに表示します">📄 履歴をまとめて取得 (2年分)</button>
+          <button class="btn" id="disc_pdf_save" title="選択した銘柄をPDF恒久保存リストに追加し、GitHub Actionsが決算短信PDF本体をリポジトリへ保存します">💾 決算短信PDFをGitHubに保存</button>
+        </div>
+        <div class="fetch-status" id="disc_bulk_status"></div>
+        <div class="meta-line">「GitHubに保存」は銘柄を<b>PDF恒久保存リスト</b>に追加し、GitHub Actionsが決算短信PDF本体をリポジトリ(frontend/pdfs/)へ保存します。以後の決算短信は自動で保存され続け、TDnetの掲載期間(約1ヶ月)を過ぎても閲覧できます。実行には⚙設定のGitHubトークンが必要です。過去2年分の「履歴取得」の結果はこのブラウザに保存されます。</div>
+      ` : '<div class="empty">マイ銘柄が未登録です。<a class="link" href="#/schedule">決算予定</a>から登録すると、まとめて取得・保存できます。</div>'}
+      <div style="margin-top:10px">
+        <span style="font-size:12px;font-weight:700">📌 PDF恒久保存リスト <span class="count" id="pdf_wl_count"></span></span>
+        <div id="pdf_wl_codes" style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0">読み込み中…</div>
+      </div>
+    </div>
     <div class="chips" id="discChips" style="align-items:center">
       ${chip("all", "すべて")}${chip("mine", "マイ銘柄のみ")}${chip("unread", "未閲覧のみ")}
       <select id="disc_cap" style="width:auto;margin-left:6px">
@@ -502,7 +541,132 @@ route("disclosures", async (app, rest) => {
     disclosureState.cap = el("disc_cap").value;
     render();
   };
+
+  renderPdfWatchlist();
+  const selectedCodes = () =>
+    [...document.querySelectorAll("#disc_checklist input:checked")].map((x) => x.value);
+  const bulkBtn = el("disc_bulk");
+  if (bulkBtn) {
+    bulkBtn.onclick = async () => {
+      const codes = selectedCodes();
+      if (!codes.length) { toast("銘柄を選択してください", true); return; }
+      bulkBtn.disabled = true;
+      try {
+        const res = await bulkFetchHistory(codes, el("disc_bulk_status"));
+        const st = el("disc_bulk_status");
+        if (st && res && res.message) st.textContent = res.message + " 結果は銘柄分析タブで確認できます。";
+      } finally {
+        bulkBtn.disabled = false;
+      }
+    };
+  }
+  const saveBtn = el("disc_pdf_save");
+  if (saveBtn) {
+    saveBtn.onclick = async () => {
+      const codes = selectedCodes();
+      if (!codes.length) { toast("銘柄を選択してください", true); return; }
+      saveBtn.disabled = true;
+      const st = el("disc_bulk_status");
+      try {
+        const msg = await savePdfWatchlist(codes, st);
+        if (st) st.textContent = msg;
+        renderPdfWatchlist();
+      } catch (e) {
+        toast(e.message, true);
+        if (st) st.textContent = "保存に失敗しました: " + e.message;
+      } finally {
+        saveBtn.disabled = false;
+      }
+    };
+  }
 });
+
+// PDF恒久保存リストの表示 (config はリポジトリ直下 → 静的配信では ../config/)
+async function renderPdfWatchlist() {
+  const box = el("pdf_wl_codes");
+  if (!box) return;
+  let codes = [];
+  try {
+    const res = await fetch("../config/pdf_watchlist.json", { cache: "no-cache" });
+    if (res.ok) {
+      const w = await res.json();
+      if (w && Array.isArray(w.codes)) codes = w.codes;
+    }
+  } catch (e) { /* サーバモード等では取得不可 */ }
+  const idx = await loadPdfIndex();
+  if (!box.isConnected) return;
+  if (!codes.length) {
+    box.innerHTML = '<span class="meta-line">リストは空です (「GitHubに保存」で追加できます)</span>';
+    return;
+  }
+  const cnt = el("pdf_wl_count");
+  if (cnt) cnt.textContent = `${codes.length}銘柄`;
+  box.innerHTML = codes.map((c) => {
+    const saved = ((idx.codes || {})[c] || []).length;
+    return `<span class="badge reg" style="font-size:12px;padding:4px 10px">${h(c)}${saved ? ` (${saved}件保存済)` : ""}</span>`;
+  }).join(" ");
+}
+
+// 選択銘柄を config/pdf_watchlist.json に追記コミットし、データ更新ワークフローを起動する
+async function savePdfWatchlist(codes, statusEl) {
+  const token = ghToken();
+  if (!token) {
+    throw new Error("GitHubトークンが未設定です。⚙設定画面で登録してください");
+  }
+  const { owner, repo } = repoInfo();
+  const url = `https://api.github.com/repos/${owner}/${repo}/contents/config/pdf_watchlist.json`;
+  const headers = { Authorization: "Bearer " + token, Accept: "application/vnd.github+json" };
+  if (statusEl) statusEl.textContent = "保存リストを更新中…";
+  // 現在のリストを取得してマージ
+  let sha, wl = { note: "決算短信PDFを恒久保存する銘柄リスト", max_recommended: 50, codes: [] };
+  const g = await fetch(url + "?ref=main", { headers });
+  if (g.ok) {
+    const j = await g.json();
+    sha = j.sha;
+    try {
+      const cur = JSON.parse(decodeURIComponent(escape(atob((j.content || "").replace(/\n/g, "")))));
+      if (cur && typeof cur === "object") wl = Object.assign(wl, cur);
+      if (!Array.isArray(wl.codes)) wl.codes = [];
+    } catch (e) { /* 壊れていたら作り直す */ }
+  } else if (g.status !== 404) {
+    throw new Error("GitHub API " + g.status + " (トークンの権限を確認してください)");
+  }
+  const before = wl.codes.length;
+  for (const c of codes) {
+    if (!wl.codes.includes(c)) wl.codes.push(c);
+  }
+  const added = wl.codes.length - before;
+  if (wl.codes.length > (wl.max_recommended || 50)) {
+    toast(`保存リストが${wl.codes.length}銘柄になりました (推奨は${wl.max_recommended || 50}銘柄まで)`, true);
+  }
+  if (added > 0) {
+    const body = JSON.stringify(wl, null, 1);
+    const put = await fetch(url, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        message: `PDF保存リストに${added}銘柄を追加`,
+        content: btoa(unescape(encodeURIComponent(body))),
+        branch: "main",
+        sha,
+      }),
+    });
+    if (!put.ok) {
+      const err = await put.json().catch(() => ({}));
+      throw new Error(err.message || ("HTTP " + put.status));
+    }
+  }
+  // データ更新ワークフローを起動 (Actions権限が無いトークンでは403 → 定期実行に任せる)
+  if (statusEl) statusEl.textContent = "保存ワークフローを起動中…";
+  const disp = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/actions/workflows/update-data.yml/dispatches`,
+    { method: "POST", headers, body: JSON.stringify({ ref: "main" }) });
+  const listMsg = added > 0 ? `${added}銘柄を保存リストに追加しました。` : "選択銘柄は既に保存リストに登録済みです。";
+  if (disp.ok || disp.status === 204) {
+    return listMsg + " 保存ワークフローを起動しました — 数分後にPDFがGitHubへ保存されます (対象: TDnet掲載期間内の決算短信。以後の新しい短信も自動保存されます)。";
+  }
+  return listMsg + " ワークフローの手動起動には、トークンに Actions: Read and write 権限が必要です。次回の定期更新 (平日1日5回) で自動的に保存されます。";
+}
 
 function disclosureRow(x) {
   const read = x.is_read
@@ -1467,8 +1631,6 @@ route("analysis", async (app, rest) => {
   const my = await api.get("/mystocks");
   const myOptions = my.items.map((m) =>
     `<option value="${h(m.code)}" ${m.code === code ? "selected" : ""}>${h(m.code)} ${h(m.name)}</option>`).join("");
-  const checkboxes = my.items.map((m) =>
-    `<label><input type="checkbox" value="${h(m.code)}" checked> ${h(m.code)} ${h(m.name)}</label>`).join("");
 
   app.innerHTML = `
     <div class="page-head"><h1>銘柄分析</h1><span class="sub">決算短信の情報と数値推移から個別銘柄を分析します</span></div>
@@ -1485,49 +1647,8 @@ route("analysis", async (app, rest) => {
         <button class="btn" id="an_show">分析する</button>
       </div>
     </div>
-    <div class="card" style="margin-bottom:16px">
-      <h2>📥 決算短信のまとめて取得（直近2年分）</h2>
-      ${my.count ? `
-        <div class="meta-line">対象のマイ銘柄を選んで、開示アーカイブ(GitHub Actionsが定期構築)から決算短信・訂正短信・業績予想修正・決算説明資料の履歴を取得します。</div>
-        <div class="checklist" id="an_checklist">${checkboxes}</div>
-        <button class="btn" id="an_bulk">選択した銘柄の決算短信をまとめて取得</button>
-        <div class="fetch-status" id="an_bulk_status"></div>
-        <div class="meta-line">※ TDnet本体の掲載期間(約1ヶ月)を過ぎた資料はPDF本体が削除されているため、タイトル表示となり 🔎 からWeb検索できます。アーカイブは過去2年分へ向けて自動構築中で、取得結果はこのブラウザに保存されます。</div>
-      ` : '<div class="empty">マイ銘柄が未登録です。<a class="link" href="#/schedule">決算予定</a>から登録すると、まとめて取得できます。</div>'}
-    </div>
-    <div class="card" style="margin-bottom:16px">
-      <h2>📌 PDF恒久保存リスト <span class="count" id="pdf_wl_count"></span></h2>
-      <div class="meta-line">リストの銘柄は、決算短信PDF本体をGitHubリポジトリへ自動保存します(TDnetの掲載期間約1ヶ月を過ぎても、5年後でも閲覧可能)。容量制限のため50銘柄までを推奨。</div>
-      <div id="pdf_wl_codes" style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0">読み込み中…</div>
-      <a class="btn small ghost" target="_blank" rel="noopener"
-         href="https://github.com/kojit1229/stock_analyze/edit/main/config/pdf_watchlist.json">GitHubでリストを編集</a>
-    </div>
+    <div class="meta-line" style="margin-bottom:14px">決算短信の「まとめて取得」と「PDFのGitHub保存」は<a class="link" href="#/disclosures">決算短信</a>タブに移動しました。</div>
     <div id="an_body">${code ? '<div class="loading">読み込み中…</div>' : '<div class="empty">銘柄を選択してください</div>'}</div>`;
-
-  // PDF保存リストの表示 (config はリポジトリ直下 → 静的配信では ../config/)
-  (async () => {
-    const box = el("pdf_wl_codes");
-    if (!box) return;
-    let codes = [];
-    try {
-      const res = await fetch("../config/pdf_watchlist.json", { cache: "no-cache" });
-      if (res.ok) {
-        const w = await res.json();
-        if (w && Array.isArray(w.codes)) codes = w.codes;
-      }
-    } catch (e) { /* サーバモード等では取得不可 */ }
-    const idx = await loadPdfIndex();
-    if (!codes.length) {
-      box.innerHTML = '<span class="meta-line">リストを取得できませんでした (GitHub上の config/pdf_watchlist.json を参照)</span>';
-      return;
-    }
-    const cnt = el("pdf_wl_count");
-    if (cnt) cnt.textContent = `${codes.length}銘柄`;
-    box.innerHTML = codes.map((c) => {
-      const saved = ((idx.codes || {})[c] || []).length;
-      return `<span class="badge reg" style="font-size:12px;padding:4px 10px">${h(c)}${saved ? ` (${saved}件保存済)` : ""}</span>`;
-    }).join(" ");
-  })();
 
   const show = () => {
     const c = el("an_select").value || el("an_code").value.trim();
@@ -1535,20 +1656,6 @@ route("analysis", async (app, rest) => {
   };
   el("an_show").onclick = show;
   el("an_select").onchange = show;
-  const bulkBtn = el("an_bulk");
-  if (bulkBtn) {
-    bulkBtn.onclick = async () => {
-      const codes = [...document.querySelectorAll("#an_checklist input:checked")].map((x) => x.value);
-      if (!codes.length) { toast("銘柄を選択してください", true); return; }
-      bulkBtn.disabled = true;
-      try {
-        await bulkFetchHistory(codes, el("an_bulk_status"));
-        if (code) renderAnalysisBody(code);
-      } finally {
-        bulkBtn.disabled = false;
-      }
-    };
-  }
   if (code) await renderAnalysisBody(code);
 });
 
@@ -1754,15 +1861,24 @@ const SCREENER_PRESETS = [
     set: { eqMin: "50", divMin: "3.5", sort: "div", order: "desc" } },
 ];
 
+let _allStocksCache = null;
+async function loadAllStocks() {
+  if (_allStocksCache) return _allStocksCache;
+  try {
+    const res = await fetch("data/stocks.json", { cache: "no-cache" });
+    if (res.ok) {
+      const j = await res.json();
+      if (Array.isArray(j) && j.length) _allStocksCache = j;
+    }
+  } catch (e) { /* 実データなし */ }
+  return _allStocksCache;
+}
+
 let _scrRows = null;
 async function buildScreenerRows() {
   if (_scrRows) return _scrRows;
-  let stocks = null;
-  try {
-    const res = await fetch("data/stocks.json", { cache: "no-cache" });
-    if (res.ok) stocks = await res.json();
-  } catch (e) { /* 実データなし */ }
-  if (!Array.isArray(stocks) || !stocks.length) return null;
+  const stocks = await loadAllStocks();
+  if (!stocks) return null;
   const [findata, prices] = await Promise.all([loadFinancials(), loadPrices()]);
   const rows = [];
   for (const s of stocks) {
@@ -1917,6 +2033,209 @@ async function renderScreenerResult() {
     };
   });
 }
+
+// ---------------------------------------------------------------------------
+// 市況概況タブ (当日の市場全体の状況)
+// ---------------------------------------------------------------------------
+route("market", async (app) => {
+  app.innerHTML = `
+    <div class="page-head"><h1>市況概況</h1><span class="sub" id="mkt_date"></span></div>
+    <div id="mkt_body"><div class="loading">読み込み中…</div></div>`;
+  const [stocks, prices, reactions, sched] = await Promise.all([
+    loadAllStocks(), loadPrices(), loadReactions(), api.get("/schedule?date_range=this_week"),
+  ]);
+  const body = el("mkt_body");
+  if (!body) return;
+  if (!stocks || !Object.keys(prices.stocks || {}).length) {
+    body.innerHTML = '<div class="empty">市況概況は実データ (frontend/data/) がある環境で利用できます。</div>';
+    return;
+  }
+  const dateEl = el("mkt_date");
+  if (dateEl && prices.date) dateEl.textContent = `${fmtDate(prices.date)} 終値時点 (平日1日5回更新)`;
+
+  // 全銘柄の当日データを結合
+  const rows = [];
+  for (const s of stocks) {
+    const p = prices.stocks[s.code];
+    if (!p) continue;
+    const close = p[0], chg = p[1], hi = p[2], lo = p[3], vol = p[4], avg = p[5];
+    rows.push({
+      code: s.code, name: s.name, market: s.market || "", sector: s.sector || "",
+      cap: s.market_cap || null, close, chg, hi, lo, vol, avg,
+      value: close != null && vol != null ? close * vol : null,
+      impact: s.market_cap && chg != null ? s.market_cap - s.market_cap / (1 + chg / 100) : null,
+    });
+  }
+  const withChg = rows.filter((r) => r.chg != null);
+  const up = withChg.filter((r) => r.chg > 0.0001).length;
+  const down = withChg.filter((r) => r.chg < -0.0001).length;
+  const flat = withChg.length - up - down;
+  const avgChg = withChg.length ? withChg.reduce((s, r) => s + r.chg, 0) / withChg.length : null;
+  const capSum = withChg.reduce((s, r) => s + (r.cap || 0), 0);
+  const wAvg = capSum ? withChg.reduce((s, r) => s + (r.cap || 0) * r.chg, 0) / capSum : null;
+
+  // 騰落レシオ (終値履歴から。最大25営業日、蓄積中は取得できた日数で計算)
+  const tail = reactions.tail || { dates: [], closes: {} };
+  let ratio = null, ratioDays = 0;
+  if (tail.dates.length >= 2) {
+    let adv = 0, dec = 0;
+    const start = Math.max(1, tail.dates.length - 25);
+    for (let i = start; i < tail.dates.length; i++) {
+      for (const code in tail.closes) {
+        const row = tail.closes[code];
+        const a = row[i - 1], b = row[i];
+        if (a != null && b != null) {
+          if (b > a) adv++;
+          else if (b < a) dec++;
+        }
+      }
+      ratioDays++;
+    }
+    if (dec > 0) ratio = (adv / dec) * 100;
+  }
+  const ratioJudge = ratio == null ? null
+    : ratio >= 120 ? ["過熱気味", "unread"] : ratio <= 70 ? ["売られすぎ圏", "ok"] : ["中立圏", "market"];
+
+  const chgSpan = (v, digits) => v == null ? "-"
+    : `<span style="color:${v >= 0 ? "#4ade80" : "#f87171"}">${v >= 0 ? "+" : ""}${v.toFixed(digits == null ? 2 : digits)}%</span>`;
+  const stat = (label, value, sub) => `<div class="card stat"><div class="label">${label}</div>
+    <div class="value" style="font-size:22px">${value}</div>${sub ? `<div class="meta-line" style="margin-top:2px">${sub}</div>` : ""}</div>`;
+
+  // ランキングテーブル
+  const nameTd = (r) => `<td class="code-cell"><a class="link" href="#/analysis/${h(r.code)}">${h(r.code)}</a></td>
+    <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h(r.name)}">${h(r.name)}</td>`;
+  const rankTable = (list, cols, headers) => `<div class="table-wrap"><table>
+    <thead><tr><th>コード</th><th>銘柄名</th>${headers.map((x) => `<th>${x}</th>`).join("")}</tr></thead>
+    <tbody>${list.map((r) => `<tr>${nameTd(r)}${cols(r)}</tr>`).join("")}</tbody></table></div>`;
+
+  const byValue = rows.filter((r) => r.value != null).sort((a, b) => b.value - a.value).slice(0, 15);
+  const gainers = [...withChg].sort((a, b) => b.chg - a.chg).slice(0, 10);
+  const losers = [...withChg].sort((a, b) => a.chg - b.chg).slice(0, 10);
+  const hi52 = rows.filter((r) => r.close != null && r.hi != null && r.close >= r.hi)
+    .sort((a, b) => (b.cap || 0) - (a.cap || 0));
+  const lo52 = rows.filter((r) => r.close != null && r.lo != null && r.close <= r.lo)
+    .sort((a, b) => (b.cap || 0) - (a.cap || 0));
+  const impacts = rows.filter((r) => r.impact != null).sort((a, b) => b.impact - a.impact);
+  const posImp = impacts.filter((r) => r.impact > 0).slice(0, 8);
+  const negImp = impacts.filter((r) => r.impact < 0).slice(-8).reverse();
+  const volSpike = rows.filter((r) => r.vol && r.avg && r.vol >= r.avg * 5)
+    .sort((a, b) => b.vol / b.avg - a.vol / a.avg).slice(0, 10);
+
+  // セクター別 (33業種・時価総額加重)
+  const secMap = new Map();
+  for (const r of withChg) {
+    if (!r.sector) continue;
+    const m = secMap.get(r.sector) || { cap: 0, wsum: 0, n: 0, sum: 0 };
+    const w = r.cap || 0;
+    m.cap += w; m.wsum += w * r.chg; m.n++; m.sum += r.chg;
+    secMap.set(r.sector, m);
+  }
+  const sectors = [...secMap.entries()]
+    .map(([name, m]) => ({ name, chg: m.cap ? m.wsum / m.cap : m.sum / m.n, n: m.n }))
+    .sort((a, b) => b.chg - a.chg);
+  const secMax = Math.max(0.01, ...sectors.map((s) => Math.abs(s.chg)));
+  const sectorBars = sectors.map((s) => {
+    const w = Math.abs(s.chg) / secMax * 100;
+    const color = s.chg >= 0 ? "#22c55e" : "#ef4444";
+    return `<div style="display:flex;align-items:center;gap:8px;padding:2px 0;font-size:12px">
+      <span style="width:110px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h(s.name)} (${s.n}銘柄)">${h(s.name)}</span>
+      <span style="width:64px;flex:none;text-align:right;color:${color}">${s.chg >= 0 ? "+" : ""}${s.chg.toFixed(2)}%</span>
+      <span style="flex:1;height:10px;background:var(--bg-elev);border-radius:4px;overflow:hidden">
+        <span style="display:block;height:100%;width:${w.toFixed(1)}%;background:${color};opacity:.8"></span></span>
+    </div>`;
+  }).join("");
+
+  // 市場区分別 (時価総額加重)
+  const segs = ["プライム", "スタンダード", "グロース"].map((seg) => {
+    const rs = withChg.filter((r) => r.market === seg);
+    const cs = rs.reduce((s, r) => s + (r.cap || 0), 0);
+    return { seg, n: rs.length, chg: cs ? rs.reduce((s, r) => s + (r.cap || 0) * r.chg, 0) / cs : null };
+  });
+
+  // 今週の決算予定 (日別件数)
+  const byDay = new Map();
+  for (const it of (sched.items || [])) byDay.set(it.announce_date, (byDay.get(it.announce_date) || 0) + 1);
+  const days = [...byDay.entries()].sort();
+  const dayMax = Math.max(1, ...days.map(([, n]) => n));
+
+  const fmtOku = (v) => v == null ? "-" : fmtMoney(v);
+  body.innerHTML = `
+    <div class="grid cols-4" style="margin-bottom:16px;grid-template-columns:repeat(5,1fr)">
+      ${stat("値上がり / 値下がり", `<span style="color:#4ade80">${up.toLocaleString("en-US")}</span> / <span style="color:#f87171">${down.toLocaleString("en-US")}</span>`, `変わらず ${flat} / 全${withChg.length.toLocaleString("en-US")}銘柄`)}
+      ${stat("平均騰落率 (単純)", chgSpan(avgChg), "全銘柄の単純平均")}
+      ${stat("平均騰落率 (加重)", chgSpan(wAvg), "時価総額加重 (大型株の影響大)")}
+      ${stat(`騰落レシオ (${ratioDays || "-"}日)`, ratio == null ? "蓄積中" : ratio.toFixed(0) + "%",
+        ratioJudge ? `<span class="badge ${ratioJudge[1]}">${ratioJudge[0]}</span> 120%超=過熱 / 70%未満=底値圏` : "終値履歴の蓄積後に25日で算出")}
+      ${stat("急騰 / 急落 (±8%)", `<span style="color:#4ade80">${withChg.filter((r) => r.chg >= 8).length}</span> / <span style="color:#f87171">${withChg.filter((r) => r.chg <= -8).length}</span>`, "銘柄数")}
+    </div>
+
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card">
+        <h2>🏭 セクター別騰落 <span class="count">33業種・時価総額加重</span></h2>
+        ${sectorBars || '<div class="empty">データなし</div>'}
+      </div>
+      <div class="card">
+        <h2>💹 売買代金ランキング <span class="count">概算 (終値×出来高)</span></h2>
+        ${rankTable(byValue, (r) => `<td class="num">${fmtOku(r.value)}</td><td class="num">${chgSpan(r.chg)}</td>`, ["売買代金", "前日比"])}
+      </div>
+    </div>
+
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card">
+        <h2>📈 値上がり率ランキング</h2>
+        ${rankTable(gainers, (r) => `<td class="num">${chgSpan(r.chg)}</td><td class="num">${r.close != null ? Number(r.close).toLocaleString("en-US") + "円" : "-"}</td>`, ["前日比", "終値"])}
+      </div>
+      <div class="card">
+        <h2>📉 値下がり率ランキング</h2>
+        ${rankTable(losers, (r) => `<td class="num">${chgSpan(r.chg)}</td><td class="num">${r.close != null ? Number(r.close).toLocaleString("en-US") + "円" : "-"}</td>`, ["前日比", "終値"])}
+      </div>
+    </div>
+
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card">
+        <h2>🚀 52週高値更新 <span class="count">${hi52.length}銘柄</span></h2>
+        ${hi52.length ? rankTable(hi52.slice(0, 10), (r) => `<td class="num">${r.close != null ? Number(r.close).toLocaleString("en-US") + "円" : "-"}</td><td class="num">${chgSpan(r.chg)}</td>`, ["終値", "前日比"]) : '<div class="empty">本日の更新はありません</div>'}
+        <div class="meta-line">時価総額の大きい順に表示。データソースの制約で年初来・上場来高値は52週高値で代替しています。</div>
+      </div>
+      <div class="card">
+        <h2>🔻 52週安値更新 <span class="count">${lo52.length}銘柄</span></h2>
+        ${lo52.length ? rankTable(lo52.slice(0, 10), (r) => `<td class="num">${r.close != null ? Number(r.close).toLocaleString("en-US") + "円" : "-"}</td><td class="num">${chgSpan(r.chg)}</td>`, ["終値", "前日比"]) : '<div class="empty">本日の更新はありません</div>'}
+      </div>
+    </div>
+
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card">
+        <h2>⚖️ 指数インパクト <span class="count">時価総額の増減額 (指数寄与の概算)</span></h2>
+        <div class="grid cols-2">
+          <div>${rankTable(posImp, (r) => `<td class="num pos">+${fmtOku(r.impact)}</td>`, ["増加額"])}</div>
+          <div>${rankTable(negImp, (r) => `<td class="num neg">${fmtOku(r.impact)}</td>`, ["減少額"])}</div>
+        </div>
+        <div class="meta-line">全銘柄の時価総額変化額。日経平均は株価加重のため厳密な寄与度とは異なりますが、市場を動かした銘柄の把握に使えます。</div>
+      </div>
+      <div class="card">
+        <h2>📊 出来高急増 <span class="count">3ヶ月平均の5倍以上</span></h2>
+        ${volSpike.length ? rankTable(volSpike, (r) => `<td class="num">${(r.vol / r.avg).toFixed(1)}倍</td><td class="num">${chgSpan(r.chg)}</td>`, ["出来高倍率", "前日比"]) : '<div class="empty">該当なし</div>'}
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <h2>🏛 市場区分別騰落 <span class="count">時価総額加重</span></h2>
+        ${segs.map((x) => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">
+          <span>${h(x.seg)} <span class="count">${x.n.toLocaleString("en-US")}銘柄</span></span><span>${chgSpan(x.chg)}</span></div>`).join("")}
+      </div>
+      <div class="card">
+        <h2>📅 今週の決算発表 <span class="count">${(sched.items || []).length}件</span></h2>
+        ${days.length ? days.map(([d, n]) => `<div style="display:flex;align-items:center;gap:8px;padding:2px 0;font-size:12px">
+          <span style="width:70px;flex:none">${fmtDate(d)}</span>
+          <span style="width:50px;flex:none;text-align:right">${n}件</span>
+          <span style="flex:1;height:10px;background:var(--bg-elev);border-radius:4px;overflow:hidden">
+            <span style="display:block;height:100%;width:${(n / dayMax * 100).toFixed(1)}%;background:var(--accent);opacity:.8"></span></span>
+        </div>`).join("") : '<div class="empty">今週の決算予定はありません</div>'}
+        <div class="meta-line">決算集中日は値動きが大きくなりやすい点に注意。<a class="link" href="#/schedule">決算予定タブ</a>で詳細を確認できます。</div>
+      </div>
+    </div>`;
+});
 
 // 決算シグナル + 投資指標カード (銘柄分析タブ)
 function analysisInsightHtml(stock, fin, price) {

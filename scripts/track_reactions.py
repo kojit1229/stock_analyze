@@ -29,7 +29,7 @@ import json
 import os
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
-TAIL_DAYS = 8            # 終値の履歴保持日数 (反応計算・連続下落判定用)
+TAIL_DAYS = 30           # 終値の履歴保持日数 (反応計算・連続下落判定・騰落レシオ25日用)
 EVENT_KEEP_DAYS = 400    # イベントの保持日数
 EVENT_CAP = 20000        # イベント総数の上限
 DISC_EVENT_TYPES = ("決算短信", "訂正決算短信", "業績予想修正", "配当予想修正", "自己株式取得")
