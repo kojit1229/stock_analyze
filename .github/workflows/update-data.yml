@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 concurrency:
   group: update-data
@@ -29,6 +30,11 @@ jobs:
         run: pip install requests pandas xlrd openpyxl
       - name: Fetch real data (JPX / TDnet / Yahoo)
         run: python scripts/fetch_real_data.py --out frontend/data
+      - name: Generate price alerts (マイ銘柄の終値アラート)
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/generate_alerts.py --data frontend/data --user config/user_data.json
       - name: Probe yanoshin CORS headers (診断用)
         continue-on-error: true
         run: |
