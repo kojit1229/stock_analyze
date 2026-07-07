@@ -145,6 +145,18 @@ class TestGenerate(unittest.TestCase):
         self.assertIn("3日続落", st["1301"]["title"])
         self.assertNotIn("7203", st)  # 連続していない
 
+    def test_streak_ignores_gaps(self):
+        # 欠損日(None)を挟んだら連続とみなさない / 直近日が欠損なら現在の連続ではない
+        tail = {"dates": ["d1", "d2", "d3", "d4", "d5"],
+                "closes": {"1301": [500.0, 480.0, None, 460.0, 440.0],   # 途中に欠損
+                           "1332": [500.0, 480.0, 460.0, 440.0, None]}}  # 直近が欠損
+        self.assertEqual(ga.streak_of(tail, "1301"), (0, 0))
+        self.assertEqual(ga.streak_of(tail, "1332"), (0, 0))
+        # 欠損なしの3日続伸は検出される
+        tail2 = {"dates": ["d1", "d2", "d3", "d4"],
+                 "closes": {"7203": [100.0, 110.0, 120.0, 130.0]}}
+        self.assertEqual(ga.streak_of(tail2, "7203"), (3, 1))
+
     def test_reaction_alert(self):
         reactions = {"tail": {"dates": [], "closes": {}}, "events": [
             {"d": "2026-07-07", "code": "1301", "t": "決算短信", "l": "", "c1": -8.2, "c2": None, "nd": None},

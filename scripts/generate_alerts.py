@@ -104,14 +104,19 @@ def fnum(v):
 
 
 def streak_of(tail, code, min_days=3):
-    """終値履歴から連続下落/上昇の日数を返す。(日数, 方向) 方向: -1/+1/0。"""
+    """終値履歴から連続下落/上昇の日数を返す。(日数, 方向) 方向: -1/+1/0。
+
+    欠損日 (None) を挟んだら連続とはみなさない。直近日が欠損している場合も
+    「現在の連続」ではないため 0 を返す。
+    """
     closes = [fnum(v) for v in (tail or {}).get("closes", {}).get(code, [])]
-    closes = [v for v in closes if v is not None]
-    if len(closes) < min_days + 1:
+    if len(closes) < min_days + 1 or closes[-1] is None:
         return 0, 0
     n = 0
     direction = 0
     for i in range(len(closes) - 1, 0, -1):
+        if closes[i] is None or closes[i - 1] is None:
+            break
         d = 1 if closes[i] > closes[i - 1] else (-1 if closes[i] < closes[i - 1] else 0)
         if d == 0:
             break

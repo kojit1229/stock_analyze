@@ -397,10 +397,12 @@ def merge_into_history(out_dir, items, valid_codes=None):
             total_added += 1
         if changed:
             # 整理: 期限切れの削除・URLの剥落・降順ソート
+            # (短い行が混入していても落ちないよう4要素に正規化する)
             for code, rows in shard["codes"].items():
                 rows[:] = [
-                    [r[0], r[1], r[2], (r[3] if r[0] >= url_cutoff else "")]
-                    for r in rows if r[0] >= keep_cutoff
+                    [q[0], q[1], q[2], (q[3] if q[0] >= url_cutoff else "")]
+                    for q in ((list(r) + ["", "", "", ""])[:4] for r in rows)
+                    if q[0] >= keep_cutoff
                 ]
                 rows.sort(key=lambda r: r[0], reverse=True)
             shard["codes"] = {c: r for c, r in shard["codes"].items() if r}

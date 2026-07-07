@@ -100,6 +100,17 @@ class TestCompute(unittest.TestCase):
         self.assertEqual(ms.oku(345e8), "345億円")
         self.assertEqual(ms.oku(None), "-")
 
+    def test_minus_100pct_does_not_crash(self):
+        # 前日比-100% (ゼロ除算になる値) でもスナップショット計算が落ちない
+        prices = {"date": "2026-07-07", "stocks": {
+            "7203": [0.0, -100.0, 3000.0, 0.0, 1000, 500],
+            "1301": [4000.0, 1.0, 5000.0, 3000.0, 100, 90],
+        }}
+        st = ms.compute_stats(STOCKS, prices, {}, [], [], "2026-07-07")
+        self.assertEqual(st["summary"]["total"], 2)
+        codes = [r["code"] for r in st["impact_neg"]]
+        self.assertNotIn("7203", codes)  # impact は None として除外される
+
 
 class TestMainOutputs(unittest.TestCase):
     def test_files_written_and_index_accumulates(self):

@@ -50,6 +50,13 @@ body {
 }
 .fetch-btn:hover { filter: brightness(1.08); }
 .fetch-btn:disabled { opacity: .6; cursor: progress; }
+/* モバイル: ナビを2段目の横スクロール行にする (1タブしか見えなくなるのを防ぐ) */
+@media (max-width: 820px) {
+  .topbar { flex-wrap: wrap; height: auto; padding: 8px 12px; gap: 8px; row-gap: 4px; }
+  .mainnav { order: 3; flex: none; width: 100%; -webkit-overflow-scrolling: touch; }
+  .mainnav a { padding: 7px 10px; font-size: 13px; }
+  .brand { margin-right: auto; }
+}
 
 /* ---- Layout ---- */
 .app { max-width: 1180px; margin: 0 auto; padding: 22px 20px 60px; }
@@ -58,15 +65,27 @@ body {
 .page-head .sub { color: var(--text-dim); font-size: 13px; }
 
 .grid { display: grid; gap: 16px; }
+/* グリッド子要素の min-width:auto を打ち消す (内部のテーブル等がカードを
+   押し広げてページ全体が横スクロールになるのを防ぐ。表は .table-wrap 側で
+   スクロールする) */
+.grid > * { min-width: 0; }
 .grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
+.grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
 .grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
-@media (max-width: 820px) { .grid.cols-2, .grid.cols-4 { grid-template-columns: 1fr; } }
+.grid.cols-5 { grid-template-columns: repeat(5, 1fr); }
+.grid.split-21 { grid-template-columns: 2fr 1fr; }
+.grid.split-32 { grid-template-columns: 3fr 2fr; }
+@media (max-width: 820px) {
+  .grid.cols-2, .grid.cols-3, .grid.split-21, .grid.split-32 { grid-template-columns: 1fr; }
+  /* 小さな統計カードは2列にして縦長になりすぎないようにする */
+  .grid.cols-4, .grid.cols-5 { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+}
 
 .card {
   background: var(--bg-card); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 16px;
 }
-.card h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+.card h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .card h2 .count { color: var(--text-dim); font-weight: 500; font-size: 13px; }
 
 /* ---- Stat tiles ---- */
