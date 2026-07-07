@@ -72,6 +72,12 @@ def zen_to_han(s):
     return s.translate(str.maketrans("０１２３４５６７８９", "0123456789"))
 
 
+def direct_pdf_url(url):
+    """TDnetミラーのリダイレクタ (rd.php?<URL>) を剥がして直接URLにする。"""
+    m = re.search(r"rd\.php\?(https?://.+)$", url or "")
+    return m.group(1) if m else (url or "")
+
+
 # ---------------------------------------------------------------------------
 # 銘柄マスタ (JPX data_j.xls)
 # ---------------------------------------------------------------------------
@@ -620,6 +626,100 @@ def fetch_financials(codes, existing, s, crumb, per_run=400):
 
 
 # ---------------------------------------------------------------------------
+# 決算短信PDFの恒久保存 (config/pdf_watchlist.json の銘柄のみ)
+#
+# TDnetの掲載期間は約1ヶ月のため、保存リストの銘柄については掲載期間内に
+# PDF本体をダウンロードしてリポジトリ (frontend/pdfs/) にコミットする。
+# 5年後でも参照できる恒久アーカイブとなる。全銘柄の保存は容量制限
+# (GitHub/Pages ~1GB) を超えるため、リスト方式とする。
+# ---------------------------------------------------------------------------
+PDF_DOC_TYPES = ("決算短信", "訂正決算短信")
+PDF_MAX_BYTES = 15 * 1024 * 1024  # 異常に大きいファイルは保存しない
+
+
+def load_pdf_watchlist(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        codes = data.get("codes") or []
+        return {str(c).strip() for c in codes if str(c).strip()}
+    except (OSError, ValueError) as e:
+        log(f"PDF保存リストが読めません ({path}): {e}")
+        return set()
+
+
+def archive_watchlist_pdfs(out_dir, pdf_dir, watchlist_path):
+    """保存リスト銘柄の決算短信PDFをダウンロードして蓄積する。"""
+    watchlist = load_pdf_watchlist(watchlist_path)
+    if not watchlist:
+        log("PDF保存リストが空のためスキップ")
+        return 0
+    try:
+        with open(os.path.join(out_dir, "disclosures.json"), encoding="utf-8") as f:
+            disclosures = json.load(f)
+    except (OSError, ValueError):
+        log("disclosures.json が読めないためPDF保存をスキップ")
+        return 0
+
+    os.makedirs(pdf_dir, exist_ok=True)
+    index_path = os.path.join(pdf_dir, "index.json")
+    index = {"codes": {}}
+    try:
+        with open(index_path, encoding="utf-8") as f:
+            loaded = json.load(f)
+            if isinstance(loaded, dict) and isinstance(loaded.get("codes"), dict):
+                index = loaded
+    except (OSError, ValueError):
+        pass
+
+    saved = skipped = failed = 0
+    for d in disclosures:
+        code = d.get("code")
+        if code not in watchlist:
+            continue
+        if d.get("doc_type") not in PDF_DOC_TYPES:
+            continue
+        url = direct_pdf_url(d.get("pdf_url") or "")
+        pub = d.get("published_at") or ""
+        if not url or not pub:
+            continue
+        fname = f"{pub[:10]}_{d.get('key', 'x')}.pdf"
+        rel = f"{code}/{fname}"
+        rows = index["codes"].setdefault(code, [])
+        if any(r[3] == rel for r in rows):
+            continue  # 保存済み
+        target_dir = os.path.join(pdf_dir, code)
+        os.makedirs(target_dir, exist_ok=True)
+        target = os.path.join(target_dir, fname)
+        try:
+            r = http_get(url, timeout=60)
+            content = r.content
+            if not content.startswith(b"%PDF"):
+                log(f"  PDF保存 {code} {pub[:10]}: PDFではない応答のためスキップ")
+                skipped += 1
+                continue
+            if len(content) > PDF_MAX_BYTES:
+                log(f"  PDF保存 {code} {pub[:10]}: サイズ超過 ({len(content):,}B) スキップ")
+                skipped += 1
+                continue
+            with open(target, "wb") as f:
+                f.write(content)
+            rows.append([pub, d.get("doc_type"), d.get("title", ""), rel])
+            rows.sort(key=lambda x: x[0], reverse=True)
+            saved += 1
+            log(f"  PDF保存 {code}: {fname} ({len(content):,}B)")
+        except Exception as e:  # noqa: BLE001
+            failed += 1
+            log(f"  PDF保存 {code} {pub[:10]}: 失敗 ({type(e).__name__}: {e})")
+        time.sleep(0.5)
+
+    if saved:
+        write_json(index_path, index)
+    log(f"PDF恒久保存: 新規{saved}件 / スキップ{skipped} / 失敗{failed} (対象{len(watchlist)}銘柄)")
+    return saved
+
+
+# ---------------------------------------------------------------------------
 # 出力
 # ---------------------------------------------------------------------------
 def write_json(path, payload):
@@ -640,6 +740,10 @@ def main():
                         help="開示アーカイブを過去方向へ何営業日分バックフィルするか")
     parser.add_argument("--backfill-only", action="store_true",
                         help="開示アーカイブのバックフィルのみ実行する (軽量モード)")
+    parser.add_argument("--pdf-dir", default="frontend/pdfs",
+                        help="決算短信PDFの恒久保存先")
+    parser.add_argument("--watchlist", default="config/pdf_watchlist.json",
+                        help="PDF恒久保存の対象銘柄リスト")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -751,6 +855,7 @@ def main():
     except Exception as e:  # noqa: BLE001
         log(f"開示アーカイブの更新でエラー: {e}")
 
+
     # 書き出し (空データでの上書きはしない)
     write_json(os.path.join(args.out, "stocks.json"), sorted(stocks.values(), key=lambda s: s["code"]))
     if schedule:
@@ -781,6 +886,13 @@ def main():
             "financials": fin_count,
         },
     }
+
+    # 保存リスト銘柄の決算短信PDFを恒久保存
+    try:
+        archive_watchlist_pdfs(args.out, args.pdf_dir, args.watchlist)
+    except Exception as e:  # noqa: BLE001
+        log(f"PDF恒久保存でエラー: {e}")
+
     write_json(os.path.join(args.out, "meta.json"), meta)
     log(f"完了: {json.dumps(meta['counts'], ensure_ascii=False)}")
 
