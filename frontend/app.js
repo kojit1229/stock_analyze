@@ -1216,6 +1216,7 @@ async function renderAnalysisBody(code) {
       全${finTotal ? finTotal.toLocaleString("en-US") : ""}銘柄をコード順に自動巡回中です(取得済み: ${finGot.toLocaleString("en-US")}銘柄・毎時拡大)。<br>
       取得され次第、ここに指標と推移チャートが表示されます。</div></div>`}
     ${last ? analysisInsightHtml(stock, fin) : ""}
+    ${financialHealthHtml(stock, fin)}
     <div class="card" style="margin-bottom:14px">
       <h2>📊 決算数値の推移
         <span style="margin-left:auto;display:inline-flex;gap:6px">
@@ -1362,6 +1363,154 @@ function analysisInsightHtml(stock, fin) {
     </div>`;
 }
 
+// ---- 財務健全性 (BS/CF) 分析 ----
+// financials.json の b系列: [期末日, 流動資産, 総資産, 流動負債, 負債合計, 株主資本, 投資有価証券]
+//                 c系列: [期末日, 営業CF, 投資CF, 財務CF]
+
+// ネットキャッシュ比率 (清原達郎氏の定義):
+//   ネットキャッシュ = 流動資産 + 投資有価証券×70% − 負債合計
+//   ネットキャッシュ比率 = ネットキャッシュ ÷ 時価総額
+function netCashInfo(bRow, marketCap) {
+  if (!bRow) return null;
+  const curA = bRow[1], totL = bRow[4], inv = bRow[6];
+  if (curA == null || totL == null) return null;
+  const netCash = curA + (inv || 0) * 0.7 - totL;
+  const ratio = marketCap ? (netCash / marketCap) * 100 : null;
+  let judge, cls;
+  if (ratio == null) { judge = "時価総額不明"; cls = "market"; }
+  else if (ratio >= 100) { judge = "超割安水準 (時価総額 < ネットキャッシュ)"; cls = "ok"; }
+  else if (ratio >= 50) { judge = "かなり割安 (清原式の目安圏)"; cls = "ok"; }
+  else if (ratio >= 0) { judge = "ネットキャッシュ・プラス"; cls = "market"; }
+  else { judge = "ネットデット (実質負債超過)"; cls = "unread"; }
+  return { netCash, ratio, inv: inv || 0, judge, cls, hasInv: inv != null };
+}
+
+// BS構成の箱グラフ (左: 資産 = 流動+固定 / 右: 流動負債+固定負債+純資産)
+function bsBoxSVG(bRow) {
+  const curA = bRow[1], totA = bRow[2], curL = bRow[3], totL = bRow[4];
+  if (totA == null || totA <= 0 || curA == null || curL == null || totL == null) return "";
+  const fixA = totA - curA;
+  const fixL = totL - curL;
+  const eq = totA - totL; // 純資産 (少数株主持分含む)
+  const W = 560, H = 260, PT = 8, PB = 26, colW = 190, gap = 40, x1 = 60, x2 = x1 + colW + gap;
+  const scaleMax = Math.max(totA, totL);
+  const ih = H - PT - PB;
+  const hOf = (v) => Math.max(0, (v / scaleMax) * ih);
+  const pct = (v) => ((v / totA) * 100).toFixed(0) + "%";
+  let g = "";
+  const seg = (x, yTop, hgt, color, label, value) => {
+    g += `<rect x="${x}" y="${yTop.toFixed(1)}" width="${colW}" height="${Math.max(1.5, hgt).toFixed(1)}" fill="${color}" rx="3" opacity="0.88"/>`;
+    if (hgt >= 30) {
+      g += `<text x="${x + colW / 2}" y="${(yTop + hgt / 2 - 3).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">${label} ${pct(value)}</text>`;
+      g += `<text x="${x + colW / 2}" y="${(yTop + hgt / 2 + 13).toFixed(1)}" text-anchor="middle" fill="#e6ebf5" font-size="11">${fmtMoney(value)}</text>`;
+    } else if (hgt >= 15) {
+      g += `<text x="${x + colW / 2}" y="${(yTop + hgt / 2 + 4).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="10">${label} ${pct(value)}</text>`;
+    }
+  };
+  // 左列: 資産 (上=流動資産, 下=固定資産)
+  let y = PT + (ih - hOf(totA));
+  seg(x1, y, hOf(curA), "#3b82f6", "流動資産", curA);
+  seg(x1, y + hOf(curA), hOf(fixA), "#6366f1", "固定資産", fixA);
+  g += `<text x="${x1 + colW / 2}" y="${H - 8}" text-anchor="middle" class="chart-tick">資産 ${fmtMoney(totA)}</text>`;
+  // 右列: 流動負債 → 固定負債 → 純資産
+  let y2 = PT + (ih - hOf(totL + Math.max(0, eq)));
+  seg(x2, y2, hOf(curL), "#f59e0b", "流動負債", curL);
+  seg(x2, y2 + hOf(curL), hOf(fixL), "#ef4444", "固定負債", fixL);
+  if (eq >= 0) {
+    seg(x2, y2 + hOf(totL), hOf(eq), "#22c55e", "純資産", eq);
+  }
+  g += `<text x="${x2 + colW / 2}" y="${H - 8}" text-anchor="middle" class="chart-tick">負債・純資産${eq < 0 ? " (債務超過)" : ""}</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" class="chart-svg" role="img">${g}</svg>`;
+}
+
+// CFパターンの類型判定 (営業, 投資, 財務 の符号)
+function cfPattern(o, i, f) {
+  const key = (o >= 0 ? "+" : "-") + (i >= 0 ? "+" : "-") + (f >= 0 ? "+" : "-");
+  const map = {
+    "+--": ["健全・成熟型", "本業で稼ぎ、投資と返済/還元に回す理想形", "ok"],
+    "+-+": ["成長投資型", "本業の稼ぎに加えて調達し、積極投資", "ok"],
+    "++-": ["資産圧縮・返済型", "本業と資産売却で負債返済/還元", "market"],
+    "+++": ["現金積上げ型", "あらゆる源泉で現金を積み上げ中", "market"],
+    "---": ["蓄え取り崩し型", "本業赤字を過去の蓄えで補填 (要注意)", "warn"],
+    "--+": ["調達依存型", "本業赤字・投資を外部調達で賄う (先行投資 or 要注意)", "warn"],
+    "-+-": ["リストラ型", "本業赤字を資産売却で補い返済 (警戒)", "unread"],
+    "-++": ["危険水準", "本業赤字を売却と調達の両方で補填", "unread"],
+  };
+  const [label, desc, cls] = map[key] || ["-", "", "market"];
+  return { key, label, desc, cls };
+}
+
+function financialHealthHtml(stock, fin) {
+  const b = fin.b || [];
+  const c = fin.c || [];
+  const lastB = b[b.length - 1];
+  if (!lastB && !c.length) {
+    return `<div class="card" style="margin-bottom:14px">
+      <h2>💰 財務健全性 (BS/CF)</h2>
+      <div class="empty">貸借対照表・キャッシュフローのデータは巡回取得中です(数時間〜1日で追加されます)。</div>
+    </div>`;
+  }
+
+  // ネットキャッシュ比率 (清原式)
+  let ncHtml = "";
+  const nc = lastB ? netCashInfo(lastB, stock.market_cap) : null;
+  if (nc) {
+    ncHtml = `
+    <div class="card" style="margin-bottom:14px">
+      <h2>💰 ネットキャッシュ比率 <span class="count">清原式 (${h(periodLabel(lastB[0]))}期末)</span></h2>
+      <div class="grid cols-4" style="grid-template-columns:repeat(3,1fr);margin-bottom:8px">
+        <div class="card stat" style="background:var(--bg-elev)"><div class="label">ネットキャッシュ</div>
+          <div class="value" style="font-size:20px;color:${nc.netCash >= 0 ? "#4ade80" : "#f87171"}">${fmtMoney(nc.netCash)}</div></div>
+        <div class="card stat" style="background:var(--bg-elev)"><div class="label">ネットキャッシュ比率 (÷時価総額)</div>
+          <div class="value" style="font-size:20px">${nc.ratio == null ? "-" : nc.ratio.toFixed(1) + "%"}</div></div>
+        <div class="card stat" style="background:var(--bg-elev)"><div class="label">判定</div>
+          <div style="margin-top:6px"><span class="badge ${nc.cls}" style="font-size:12px;padding:4px 10px">${h(nc.judge)}</span></div></div>
+      </div>
+      <div class="meta-line">ネットキャッシュ = 流動資産 ${fmtMoney(lastB[1])} + 投資有価証券${nc.hasInv ? ` ${fmtMoney(nc.inv)}` : "(データなし=0扱い)"}×70% − 負債合計 ${fmtMoney(lastB[4])}。比率100%超は「会社の換金価値が時価総額を上回る」水準。</div>
+    </div>`;
+  }
+
+  // BS構成
+  let bsHtml = "";
+  if (lastB && lastB[2] != null) {
+    const eq = lastB[2] - lastB[4];
+    const eqRatio = lastB[2] > 0 ? (eq / lastB[2]) * 100 : null;
+    bsHtml = `
+    <div class="card" style="margin-bottom:14px">
+      <h2>🏛 貸借対照表の構成 <span class="count">${h(periodLabel(lastB[0]))}期末 / 自己資本比率 ${eqRatio == null ? "-" : eqRatio.toFixed(1) + "%"}</span></h2>
+      ${bsBoxSVG(lastB)}
+      <div class="meta-line">流動資産 ${fmtMoney(lastB[1])} / 固定資産 ${fmtMoney(lastB[2] - lastB[1])} / 流動負債 ${fmtMoney(lastB[3])} / 固定負債 ${fmtMoney(lastB[4] - lastB[3])} / 純資産 ${fmtMoney(eq)}${eq < 0 ? ' <span class="badge unread">債務超過</span>' : ""}</div>
+    </div>`;
+  }
+
+  // CF (符号と推移)
+  let cfHtml = "";
+  if (c.length) {
+    const lastC = c[c.length - 1];
+    const pat = cfPattern(lastC[1] || 0, lastC[2] || 0, lastC[3] || 0);
+    const sign = (v) => v == null ? "<td>-</td>"
+      : `<td class="${v >= 0 ? "pos" : "neg"}">${v >= 0 ? "＋" : "−"} ${fmtMoney(Math.abs(v))}</td>`;
+    const rows = [];
+    for (let i = c.length - 1; i >= 0; i--) {
+      const r = c[i];
+      const fcf = r[1] != null && r[2] != null ? r[1] + r[2] : null;
+      rows.push(`<tr><td>${h(periodLabel(r[0]))}</td>${sign(r[1])}${sign(r[2])}${sign(r[3])}${sign(fcf)}</tr>`);
+    }
+    cfHtml = `
+    <div class="card" style="margin-bottom:14px">
+      <h2>💸 キャッシュフロー <span class="count">直近パターン: 営業${lastC[1] >= 0 ? "＋" : "−"} 投資${lastC[2] >= 0 ? "＋" : "−"} 財務${lastC[3] >= 0 ? "＋" : "−"}</span></h2>
+      <div style="margin-bottom:8px"><span class="badge ${pat.cls}" style="font-size:12px;padding:4px 12px">${h(pat.label)}</span>
+        <span class="meta-line" style="display:inline;margin-left:8px">${h(pat.desc)}</span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>期</th><th>営業CF</th><th>投資CF</th><th>財務CF</th><th>FCF (営業+投資)</th></tr></thead>
+        <tbody>${rows.join("")}</tbody>
+      </table></div>
+    </div>`;
+  }
+
+  return ncHtml + bsHtml + cfHtml;
+}
+
 // 業績数値テーブル (年次/四半期、前期比つき)
 function performanceTableHtml(rows, mode) {
   if (!rows.length) return "";
@@ -1419,6 +1568,7 @@ async function renderCompareBody() {
 
   const lastA = (s) => { const a = s._fin.a || []; return a[a.length - 1] || null; };
   const prevA = (s) => { const a = s._fin.a || []; return a[a.length - 2] || null; };
+  const lastB = (s) => { const b = s._fin.b || []; return b[b.length - 1] || null; };
   const cell = (fn, cls) => stocks.map((s) => {
     const v = fn(s);
     return `<td class="${typeof cls === "function" ? cls(s) : (cls || "")}">${v}</td>`;
@@ -1448,6 +1598,18 @@ async function renderCompareBody() {
     <tr><td class="metric-name">EPS</td>${cell((s) => { const l = lastA(s); return l && l[4] != null ? l[4].toFixed(1) + "円" : "-"; })}</tr>
     <tr><td class="metric-name">PER (概算)</td>${cell((s) => { const l = lastA(s); const ni = l && l[3]; return s.market_cap && ni > 0 ? (s.market_cap / ni).toFixed(1) + "倍" : "-"; })}</tr>
     <tr><td class="metric-name">PSR (概算)</td>${cell((s) => { const l = lastA(s); const rev = l && l[1]; return s.market_cap && rev > 0 ? (s.market_cap / rev).toFixed(2) + "倍" : "-"; })}</tr>
+    <tr><td class="metric-name">ネットキャッシュ比率 (清原式)</td>${cell((s) => {
+      const nc = netCashInfo(lastB(s), s.market_cap);
+      return !nc || nc.ratio == null ? "-" : nc.ratio.toFixed(1) + "%";
+    }, (s) => {
+      const nc = netCashInfo(lastB(s), s.market_cap);
+      return !nc || nc.ratio == null ? "" : nc.ratio >= 50 ? "pos" : nc.ratio < 0 ? "neg" : "";
+    })}</tr>
+    <tr><td class="metric-name">自己資本比率</td>${cell((s) => {
+      const b = lastB(s);
+      if (!b || b[2] == null || b[4] == null || b[2] <= 0) return "-";
+      return (((b[2] - b[4]) / b[2]) * 100).toFixed(1) + "%";
+    })}</tr>
     <tr><td class="metric-name">次回決算予定</td>${cell(nextSched)}</tr>
     <tr><td class="metric-name">分析コメント</td>${cell((s) => {
       const c = analysisState.comments[s.code];
