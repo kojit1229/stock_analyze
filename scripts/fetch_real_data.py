@@ -538,15 +538,31 @@ def fetch_market_caps(codes, s, crumb):
 # 財務数値の推移 (Yahoo fundamentals-timeseries、巡回取得)
 # ---------------------------------------------------------------------------
 TS_TYPES = [
+    # PL (年次・四半期)
     "annualTotalRevenue", "annualOperatingIncome", "annualNetIncome", "annualDilutedEPS",
     "quarterlyTotalRevenue", "quarterlyOperatingIncome", "quarterlyNetIncome", "quarterlyDilutedEPS",
+    # BS (年次のみ) — ネットキャッシュ比率(清原式)とBS構成分析に使用
+    "annualCurrentAssets", "annualTotalAssets",
+    "annualCurrentLiabilities", "annualTotalLiabilitiesNetMinorityInterest",
+    "annualStockholdersEquity", "annualInvestmentsAndAdvances",
+    # CF (年次のみ)
+    "annualOperatingCashFlow", "annualInvestingCashFlow", "annualFinancingCashFlow",
 ]
+
+# financials.json の系列定義: キー → [期末日, 各指標...] の指標名リスト
+FIN_SERIES = {
+    "a": ["TotalRevenue", "OperatingIncome", "NetIncome", "DilutedEPS"],
+    "b": ["CurrentAssets", "TotalAssets", "CurrentLiabilities",
+          "TotalLiabilitiesNetMinorityInterest", "StockholdersEquity", "InvestmentsAndAdvances"],
+    "c": ["OperatingCashFlow", "InvestingCashFlow", "FinancingCashFlow"],
+}
 
 
 def parse_timeseries(payload):
-    """Yahoo fundamentals-timeseries 応答を {a: [...], q: [...]} に変換する。
+    """Yahoo fundamentals-timeseries 応答を系列dictに変換する。
 
-    各要素は [期末日, 売上高, 営業利益, 純利益, EPS] (取得できない値は None)。
+    返り値: {"a": PL年次, "q": PL四半期, "b": BS年次, "c": CF年次}
+    各要素は [期末日, 指標...] (FIN_SERIES 定義順。取得できない値は None)。
     """
     annual, quarterly = {}, {}
     for block in (payload.get("timeseries", {}).get("result") or []):
@@ -565,20 +581,22 @@ def parse_timeseries(payload):
             metric = tname.replace("annual", "").replace("quarterly", "")
             bucket.setdefault(d, {})[metric] = v
 
-    def pack(bucket):
+    def pack(bucket, metrics):
         out = []
         for d in sorted(bucket):
             m = bucket[d]
-            out.append([
-                d,
-                m.get("TotalRevenue"),
-                m.get("OperatingIncome"),
-                m.get("NetIncome"),
-                m.get("DilutedEPS"),
-            ])
+            vals = [m.get(k) for k in metrics]
+            if all(v is None for v in vals):
+                continue  # この系列の値が1つもない期は持たない
+            out.append([d] + vals)
         return out[-12:]  # 直近12期分まで保持
 
-    return {"a": pack(annual), "q": pack(quarterly)}
+    return {
+        "a": pack(annual, FIN_SERIES["a"]),
+        "q": pack(quarterly, FIN_SERIES["a"]),
+        "b": pack(annual, FIN_SERIES["b"]),
+        "c": pack(annual, FIN_SERIES["c"]),
+    }
 
 
 def fetch_financials(codes, existing, s, crumb, per_run=400):
@@ -590,7 +608,12 @@ def fetch_financials(codes, existing, s, crumb, per_run=400):
     """
     stocks_data = existing.setdefault("stocks", {})
     today = jst_now().strftime("%Y-%m-%d")
-    order = sorted(codes, key=lambda c: (stocks_data.get(c, {}).get("t", ""), c))
+    # 優先順: BS/CF系列(b)が無い旧スキーマの銘柄 → 最終取得が古い順 → コード順
+    order = sorted(codes, key=lambda c: (
+        0 if "b" not in stocks_data.get(c, {}) else 1,
+        stocks_data.get(c, {}).get("t", ""),
+        c,
+    ))
     targets = order[:per_run]
     now_ts = int(time.time())
     ok = fails = empty = 0
@@ -608,13 +631,17 @@ def fetch_financials(codes, existing, s, crumb, per_run=400):
             r.raise_for_status()
             entry = parse_timeseries(r.json())
             entry["t"] = today
-            if entry["a"] or entry["q"]:
+            if entry["a"] or entry["q"] or entry["b"] or entry["c"]:
                 stocks_data[code] = entry
                 ok += 1
             else:
-                # データが無い銘柄も t を記録し、毎回問い合わせないようにする
+                # データが無い銘柄も t と空系列を記録し、毎回問い合わせないようにする
                 old = stocks_data.get(code, {})
-                stocks_data[code] = {"a": old.get("a", []), "q": old.get("q", []), "t": today}
+                stocks_data[code] = {
+                    "a": old.get("a", []), "q": old.get("q", []),
+                    "b": old.get("b", []), "c": old.get("c", []),
+                    "t": today,
+                }
                 empty += 1
         except Exception as e:  # noqa: BLE001
             fails += 1
