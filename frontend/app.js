@@ -338,7 +338,13 @@ route("mystocks", async (app) => {
   const d = await api.get("/mystocks");
   app.innerHTML = `
     <div class="page-head"><h1>マイ銘柄</h1><span class="sub">${d.count}件登録中</span>
-      <span style="margin-left:auto"><button class="fetch-btn" id="fetchMy">⟳ 決算短信を取得</button></span></div>
+      <span style="margin-left:auto;display:inline-flex;gap:8px;align-items:center">
+        <button class="btn small ghost" id="backupBtn" title="マイ銘柄・閲覧状態・分析コメント等をJSONファイルに保存">⬇ バックアップ</button>
+        <button class="btn small ghost" id="restoreBtn" title="バックアップJSONから復元">⬆ 復元</button>
+        <input type="file" id="restoreFile" accept=".json,application/json" style="display:none">
+        <button class="fetch-btn" id="fetchMy">⟳ 決算短信を取得</button>
+      </span></div>
+    <div class="meta-line" style="margin-bottom:12px">マイ銘柄・閲覧状態・分析コメントはこのブラウザにのみ保存されます。端末変更やキャッシュクリアに備えて、定期的にバックアップしてください。</div>
     ${d.count === 0 ? '<div class="empty">まだ銘柄が登録されていません。<a class="link" href="#/schedule">決算予定一覧</a>から登録しましょう。</div>' : `
     <div class="table-wrap"><table>
       <thead><tr><th>コード</th><th>銘柄名</th><th>保有区分</th><th>重要度</th><th>次回決算</th><th>取得状況</th><th>メモ</th><th>操作</th></tr></thead>
@@ -346,6 +352,13 @@ route("mystocks", async (app) => {
     </table></div>`}`;
   const fm = el("fetchMy");
   if (fm) fm.onclick = () => runFetch();
+  el("backupBtn").onclick = downloadBackup;
+  el("restoreBtn").onclick = () => el("restoreFile").click();
+  el("restoreFile").onchange = () => {
+    const f = el("restoreFile").files && el("restoreFile").files[0];
+    if (f) restoreBackup(f);
+    el("restoreFile").value = "";
+  };
   app.querySelectorAll("button[data-edit]").forEach((b) => b.onclick = () => openEditModal(b.dataset.edit));
   app.querySelectorAll("button[data-del]").forEach((b) => b.onclick = () => removeMyStock(b.dataset.del));
 });
@@ -446,13 +459,24 @@ async function disclosureDetail(app, id) {
   const pdfUrl = api.pdfUrl(id);
   const isExternal = /^https?:/.test(pdfUrl);
   const hasPdf = !!pdfUrl;
+  // リポジトリに恒久保存されたPDFがあれば最優先で使う (同一オリジンのため
+  // 埋め込み表示が確実に動き、TDnetの掲載期間後も閲覧できる)
+  const localPdf = findArchivedPdf(await loadPdfIndex(), d.code, d.published_at);
   const downloadLink = !hasPdf ? ""
     : api.local
       ? `<a class="btn small ghost" href="${pdfUrl}" ${isExternal ? 'target="_blank" rel="noopener"' : `download="${h(d.pdf_path || d.code + ".pdf")}"`}>⬇ ダウンロード</a>`
       : `<a class="btn small ghost" href="${pdfUrl}?download=1">⬇ ダウンロード</a>`;
   // 外部PDF (TDnet) はサイト側の制約で埋め込み表示できない場合があるため、
   // 開くボタンを主動線にし、埋め込みはベストエフォートとする
-  const viewer = !hasPdf
+  const viewer = localPdf
+    ? `<div class="pdf-toolbar">
+         <span class="badge ok">📌 リポジトリ保存済み</span>
+         <a class="btn" href="${localPdf}" target="_blank" rel="noopener">📄 PDFを開く（保存版）</a>
+         ${isExternal ? `<a class="btn small ghost" href="${pdfUrl}" target="_blank" rel="noopener">TDnet版を開く</a>` : ""}
+       </div>
+       <iframe class="pdf-frame" src="${localPdf}" title="PDF"></iframe>
+       <div class="meta-line">このPDFはリポジトリに恒久保存されたものです。TDnetの掲載期間後も閲覧できます。</div>`
+    : !hasPdf
     ? `<div class="empty">この資料のPDFはTDnetの掲載期間(約1ヶ月)を過ぎたため取得できません。<br>
          <a class="btn" style="margin-top:10px;display:inline-block" target="_blank" rel="noopener"
             href="https://www.google.com/search?q=${encodeURIComponent((d.title || "").slice(0, 60) + " PDF")}">🔎 Webで検索する</a></div>`
@@ -677,6 +701,69 @@ function saveAnalysisState() {
   try { localStorage.setItem(ANALYSIS_KEY, JSON.stringify(analysisState)); } catch (e) { /* 容量超過等は無視 */ }
 }
 
+// ---- バックアップ/復元 ----
+// マイ銘柄・閲覧状態・分析コメント等はブラウザ(localStorage)にのみ保存される
+// ため、キャッシュクリアや端末変更で消失するリスクがある。長期運用(5年)の
+// 前提でJSONファイルへのエクスポート/インポートを提供する。
+const BACKUP_KEYS = [
+  "kessan_local_v1",     // マイ銘柄・サンプルモードの取得済み短信
+  "kessan_overlay_v1",   // 実データ短信の閲覧済み/コメント
+  "kessan_seen_v1",      // 新着判定の既知キー
+  "kessan_analysis_v1",  // 分析コメント・取得済み履歴
+  "kessan_compare_v1",   // 比較銘柄リスト
+];
+
+function downloadBackup() {
+  const payload = { app: "kessan-navi", version: 1, data: {} };
+  for (const k of BACKUP_KEYS) {
+    try {
+      const v = localStorage.getItem(k);
+      if (v != null) payload.data[k] = v;
+    } catch (e) { /* 読めないキーはスキップ */ }
+  }
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  payload.exported_at = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  const blob = new Blob([JSON.stringify(payload, null, 1)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `kessan-backup-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+  toast("バックアップファイルをダウンロードしました");
+}
+
+function restoreBackup(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    let payload;
+    try {
+      payload = JSON.parse(String(reader.result));
+    } catch (e) {
+      toast("バックアップファイルを読み込めません (JSONが不正)", true);
+      return;
+    }
+    if (!payload || payload.app !== "kessan-navi" || !payload.data) {
+      toast("決算ナビのバックアップファイルではありません", true);
+      return;
+    }
+    const keys = Object.keys(payload.data).filter((k) => BACKUP_KEYS.includes(k));
+    if (!keys.length) {
+      toast("復元できるデータがありません", true);
+      return;
+    }
+    if (!confirm(`バックアップ(${payload.exported_at || "日時不明"})から${keys.length}項目を復元します。現在のブラウザ内データは上書きされます。よろしいですか?`)) return;
+    for (const k of keys) {
+      try { localStorage.setItem(k, payload.data[k]); } catch (e) { /* 容量超過等 */ }
+    }
+    toast("復元しました。再読み込みします…");
+    setTimeout(() => location.reload(), 800);
+  };
+  reader.readAsText(file);
+}
+
 const COMPARE_KEY = "kessan_compare_v1";
 function loadCompareCodes() {
   try {
@@ -709,6 +796,35 @@ function yoyPct(cur, prev) {
 function periodLabel(d) {
   if (!d || d.length < 7) return String(d || "");
   return d.slice(2, 4) + "/" + String(Number(d.slice(5, 7)));
+}
+function cagrPct(first, last, years) {
+  if (first == null || last == null || first <= 0 || last <= 0 || years <= 0) return null;
+  return (Math.pow(last / first, 1 / years) - 1) * 100;
+}
+
+// 年次業績から決算シグナル (増収増益・利益率改善・最高益更新など) を判定する
+function buildSignals(a) {
+  const out = [];
+  const n = a.length;
+  if (n < 2) return out;
+  const L = a[n - 1], P = a[n - 2];
+  const push = (label, good) => out.push({ label, good });
+  if (L[1] != null && P[1] != null) push(L[1] > P[1] ? "増収" : "減収", L[1] > P[1]);
+  if (L[2] != null && P[2] != null) push(L[2] > P[2] ? "営業増益" : "営業減益", L[2] > P[2]);
+  const mL = L[1] && L[2] != null ? L[2] / L[1] : null;
+  const mP = P[1] && P[2] != null ? P[2] / P[1] : null;
+  if (mL != null && mP != null) push(mL > mP ? "営業利益率改善" : "営業利益率悪化", mL > mP);
+  if (L[3] != null && P[3] != null) {
+    if (P[3] < 0 && L[3] >= 0) push("黒字転換", true);
+    else if (P[3] >= 0 && L[3] < 0) push("赤字転落", false);
+  }
+  if (n >= 3) {
+    const nis = a.map((r) => r[3]).filter((v) => v != null);
+    if (L[3] != null && nis.length >= 3 && L[3] >= Math.max(...nis)) push("最高益更新", true);
+    const revs = a.map((r) => r[1]).filter((v) => v != null);
+    if (L[1] != null && revs.length >= 3 && L[1] >= Math.max(...revs)) push("最高売上更新", true);
+  }
+  return out;
 }
 
 // ---- SVGチャート (依存ライブラリなし) ----
@@ -799,6 +915,30 @@ async function loadHistoryShard(prefix) {
   } catch (e) { /* アーカイブ未構築 */ }
   HIST_SHARD_CACHE[prefix] = shard;
   return shard;
+}
+
+// PDF恒久保存アーカイブ (config/pdf_watchlist.json の銘柄の決算短信PDFを
+// GitHub Actions がリポジトリの pdfs/ に保存している) のインデックス
+let _pdfIndexCache = null;
+async function loadPdfIndex() {
+  if (_pdfIndexCache) return _pdfIndexCache;
+  let idx = { codes: {} };
+  try {
+    const res = await fetch("pdfs/index.json", { cache: "no-cache" });
+    if (res.ok) {
+      const d = await res.json();
+      if (d && d.codes) idx = d;
+    }
+  } catch (e) { /* 未構築 */ }
+  _pdfIndexCache = idx;
+  return idx;
+}
+
+function findArchivedPdf(idx, code, publishedAt) {
+  const rows = (idx.codes || {})[code] || [];
+  const key = (publishedAt || "").slice(0, 16);
+  const r = rows.find((x) => (x[0] || "").slice(0, 16) === key);
+  return r ? "pdfs/" + r[3] : null;
 }
 
 let _metaInfoCache = null;
@@ -894,18 +1034,22 @@ function mergedHistory(code, globalItems) {
 
 function historyRow(it) {
   const fresh = (() => {
-    const d = new Date(it.published_at);
-    return isFinite(d) && (Date.now() - d.getTime()) < 40 * 86400e3;
+    const s = String(it.published_at || "").slice(0, 10);
+    const [y, mo, dd] = s.split("-").map(Number);
+    if (!y || !mo || !dd) return false;
+    return (Date.now() - new Date(y, mo - 1, dd).getTime()) < 40 * 86400e3;
   })();
   const corr = it.doc_type && it.doc_type.startsWith("訂正") ? "warn" : "market";
   const searchQ = encodeURIComponent(it.title.slice(0, 60) + " PDF");
-  const link = it.pdf_url
-    ? `<a class="link" href="${h(it.pdf_url)}" target="_blank" rel="noopener">${h(it.title)}</a>`
-    : h(it.title);
+  const link = it._local
+    ? `<a class="link" href="${h(it._local)}" target="_blank" rel="noopener">${h(it.title)}</a> <span class="badge ok" title="リポジトリに恒久保存済み">📌保存済</span>`
+    : it.pdf_url
+      ? `<a class="link" href="${h(it.pdf_url)}" target="_blank" rel="noopener">${h(it.title)}</a>`
+      : h(it.title);
   return `<tr>
     <td>${fmtDateTime(it.published_at)}</td>
     <td><span class="badge ${corr}">${h(it.doc_type || "")}</span></td>
-    <td>${link}${fresh ? "" : ` <a class="link" href="https://www.google.com/search?q=${searchQ}" target="_blank" rel="noopener" title="TDnetの掲載期間(約1ヶ月)を過ぎたPDFは削除されている場合があります。Webを検索します">🔎</a>`}</td>
+    <td>${link}${(fresh || it._local) ? "" : ` <a class="link" href="https://www.google.com/search?q=${searchQ}" target="_blank" rel="noopener" title="TDnetの掲載期間(約1ヶ月)を過ぎたPDFは削除されている場合があります。Webを検索します">🔎</a>`}</td>
   </tr>`;
 }
 
@@ -947,7 +1091,39 @@ route("analysis", async (app, rest) => {
         <div class="meta-line">※ TDnet本体の掲載期間(約1ヶ月)を過ぎた資料はPDF本体が削除されているため、タイトル表示となり 🔎 からWeb検索できます。アーカイブは過去2年分へ向けて自動構築中で、取得結果はこのブラウザに保存されます。</div>
       ` : '<div class="empty">マイ銘柄が未登録です。<a class="link" href="#/schedule">決算予定</a>から登録すると、まとめて取得できます。</div>'}
     </div>
+    <div class="card" style="margin-bottom:16px">
+      <h2>📌 PDF恒久保存リスト <span class="count" id="pdf_wl_count"></span></h2>
+      <div class="meta-line">リストの銘柄は、決算短信PDF本体をGitHubリポジトリへ自動保存します(TDnetの掲載期間約1ヶ月を過ぎても、5年後でも閲覧可能)。容量制限のため50銘柄までを推奨。</div>
+      <div id="pdf_wl_codes" style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0">読み込み中…</div>
+      <a class="btn small ghost" target="_blank" rel="noopener"
+         href="https://github.com/kojit1229/stock_analyze/edit/main/config/pdf_watchlist.json">GitHubでリストを編集</a>
+    </div>
     <div id="an_body">${code ? '<div class="loading">読み込み中…</div>' : '<div class="empty">銘柄を選択してください</div>'}</div>`;
+
+  // PDF保存リストの表示 (config はリポジトリ直下 → 静的配信では ../config/)
+  (async () => {
+    const box = el("pdf_wl_codes");
+    if (!box) return;
+    let codes = [];
+    try {
+      const res = await fetch("../config/pdf_watchlist.json", { cache: "no-cache" });
+      if (res.ok) {
+        const w = await res.json();
+        if (w && Array.isArray(w.codes)) codes = w.codes;
+      }
+    } catch (e) { /* サーバモード等では取得不可 */ }
+    const idx = await loadPdfIndex();
+    if (!codes.length) {
+      box.innerHTML = '<span class="meta-line">リストを取得できませんでした (GitHub上の config/pdf_watchlist.json を参照)</span>';
+      return;
+    }
+    const cnt = el("pdf_wl_count");
+    if (cnt) cnt.textContent = `${codes.length}銘柄`;
+    box.innerHTML = codes.map((c) => {
+      const saved = ((idx.codes || {})[c] || []).length;
+      return `<span class="badge reg" style="font-size:12px;padding:4px 10px">${h(c)}${saved ? ` (${saved}件保存済)` : ""}</span>`;
+    }).join(" ");
+  })();
 
   const show = () => {
     const c = el("an_select").value || el("an_code").value.trim();
@@ -1015,6 +1191,11 @@ async function renderAnalysisBody(code) {
     { key: String(d.id), title: d.title, doc_type: d.doc_type, published_at: d.published_at, pdf_url: d.pdf_url || "" }
   ));
   const hist = mergedHistory(code, [...shardItems, ...globalItems]);
+  const pdfIdx = await loadPdfIndex();
+  for (const it of hist) {
+    const lp = findArchivedPdf(pdfIdx, code, it.published_at);
+    if (lp) it._local = lp;
+  }
   const cachedInfo = analysisState.history[code];
   const comment = analysisState.comments[code] || "";
 
@@ -1034,6 +1215,7 @@ async function renderAnalysisBody(code) {
     </div>` : `<div class="card" style="margin-bottom:14px"><div class="empty">この銘柄の財務数値(売上高・利益など)はまだ取得されていません。<br>
       全${finTotal ? finTotal.toLocaleString("en-US") : ""}銘柄をコード順に自動巡回中です(取得済み: ${finGot.toLocaleString("en-US")}銘柄・毎時拡大)。<br>
       取得され次第、ここに指標と推移チャートが表示されます。</div></div>`}
+    ${last ? analysisInsightHtml(stock, fin) : ""}
     <div class="card" style="margin-bottom:14px">
       <h2>📊 決算数値の推移
         <span style="margin-left:auto;display:inline-flex;gap:6px">
@@ -1048,7 +1230,8 @@ async function renderAnalysisBody(code) {
         ${chartSVG({ title: "営業利益率", labels, unit: "pct", series: [{ name: "営業利益率", color: CHART_COLORS[4], values: opm, type: "line" }] })}
         ${chartSVG({ title: "EPS", labels, unit: "yen", series: [{ name: "EPS(円)", color: CHART_COLORS[3], values: eps, type: "line" }] })}
       </div>
-      <div class="meta-line">出典: Yahoo Finance (年次は直近${(fin.a || []).length}期 / 四半期は取得できる範囲)。単位: 円。</div>
+      ${performanceTableHtml(rows, analysisView.mode)}
+      <div class="meta-line">出典: Yahoo Finance (年次は直近${(fin.a || []).length}期 / 四半期は取得できる範囲)。単位: 円。PER・PSRは時価総額と直近通期実績からの概算。</div>
     </div>
     <div class="grid cols-2" style="grid-template-columns:3fr 2fr">
       <div class="card">
@@ -1144,6 +1327,75 @@ route("compare", async (app) => {
   await renderCompareBody();
 });
 
+// 決算シグナル + 投資指標カード (銘柄分析タブ)
+function analysisInsightHtml(stock, fin) {
+  const a = fin.a || [];
+  const n = a.length;
+  const last = a[n - 1];
+  const signals = buildSignals(a);
+  const sigHtml = signals.length
+    ? signals.map((s) => `<span class="badge ${s.good ? "ok" : "unread"}" style="font-size:12px;padding:4px 12px">${h(s.label)}</span>`).join(" ")
+    : '<span class="meta-line">判定に必要な期数が不足しています</span>';
+
+  const rev = last && last[1], op = last && last[2], ni = last && last[3];
+  const cap = stock.market_cap;
+  const per = cap && ni > 0 ? cap / ni : null;
+  const psr = cap && rev > 0 ? cap / rev : null;
+  const nim = rev && ni != null ? (ni / rev) * 100 : null;
+  const yrs = Math.min(3, n - 1);
+  const revCagr = yrs >= 2 ? cagrPct(a[n - 1 - yrs][1], last[1], yrs) : null;
+  const opCagr = yrs >= 2 ? cagrPct(a[n - 1 - yrs][2], last[2], yrs) : null;
+  const kv = (label, v) => `<div class="card stat"><div class="label">${label}</div><div class="value" style="font-size:18px">${v}</div></div>`;
+  const pct = (v) => (v == null ? "-" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%");
+
+  return `
+    <div class="card" style="margin-bottom:14px">
+      <h2>🔎 決算シグナル <span class="count">(直近通期 ${last ? h(periodLabel(last[0])) + "期" : ""} vs 前期)</span></h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${sigHtml}</div>
+    </div>
+    <div class="grid cols-4" style="margin-bottom:14px;grid-template-columns:repeat(5,1fr)">
+      ${kv("PER (概算)", per == null ? "-" : per.toFixed(1) + "倍")}
+      ${kv("PSR (概算)", psr == null ? "-" : psr.toFixed(2) + "倍")}
+      ${kv("純利益率", nim == null ? "-" : nim.toFixed(1) + "%")}
+      ${kv(`売上CAGR (${yrs}年)`, pct(revCagr))}
+      ${kv(`営業利益CAGR (${yrs}年)`, pct(opCagr))}
+    </div>`;
+}
+
+// 業績数値テーブル (年次/四半期、前期比つき)
+function performanceTableHtml(rows, mode) {
+  if (!rows.length) return "";
+  const yoyLabel = mode === "q" ? "前年同期比" : "前期比";
+  const back = mode === "q" ? 4 : 1;
+  const yoyCell = (i, idx) => {
+    const prev = rows[i - back];
+    const v = yoyPct(rows[i][idx], prev && prev[idx]);
+    if (v == null) return "<td>-</td>";
+    return `<td class="${v >= 0 ? "pos" : "neg"}">${v >= 0 ? "+" : ""}${v.toFixed(1)}%</td>`;
+  };
+  const body = [];
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    const opm = r[1] && r[2] != null ? ((r[2] / r[1]) * 100).toFixed(1) + "%" : "-";
+    body.push(`<tr>
+      <td>${h(periodLabel(r[0]))}</td>
+      <td class="num">${fmtMoney(r[1])}</td>${yoyCell(i, 1)}
+      <td class="num">${fmtMoney(r[2])}</td>${yoyCell(i, 2)}
+      <td class="num">${opm}</td>
+      <td class="num">${fmtMoney(r[3])}</td>
+      <td class="num">${r[4] == null ? "-" : r[4].toFixed(1) + "円"}</td>
+    </tr>`);
+  }
+  return `
+    <div style="margin-top:14px">
+      <div class="chart-title">業績数値 (${mode === "q" ? "四半期" : "年次"})</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>期</th><th>売上高</th><th>${yoyLabel}</th><th>営業利益</th><th>${yoyLabel}</th><th>営業利益率</th><th>純利益</th><th>EPS</th></tr></thead>
+        <tbody>${body.join("")}</tbody>
+      </table></div>
+    </div>`;
+}
+
 async function renderCompareBody() {
   const body = el("cmp_body");
   if (!body) return;
@@ -1194,6 +1446,8 @@ async function renderCompareBody() {
     <tr><td class="metric-name">営業利益率</td>${cell((s) => { const l = lastA(s); return fmtPct(l && l[1] && l[2] != null ? (l[2] / l[1]) * 100 : null); })}</tr>
     <tr><td class="metric-name">純利益</td>${cell((s) => { const l = lastA(s); return fmtMoney(l && l[3]); })}</tr>
     <tr><td class="metric-name">EPS</td>${cell((s) => { const l = lastA(s); return l && l[4] != null ? l[4].toFixed(1) + "円" : "-"; })}</tr>
+    <tr><td class="metric-name">PER (概算)</td>${cell((s) => { const l = lastA(s); const ni = l && l[3]; return s.market_cap && ni > 0 ? (s.market_cap / ni).toFixed(1) + "倍" : "-"; })}</tr>
+    <tr><td class="metric-name">PSR (概算)</td>${cell((s) => { const l = lastA(s); const rev = l && l[1]; return s.market_cap && rev > 0 ? (s.market_cap / rev).toFixed(2) + "倍" : "-"; })}</tr>
     <tr><td class="metric-name">次回決算予定</td>${cell(nextSched)}</tr>
     <tr><td class="metric-name">分析コメント</td>${cell((s) => {
       const c = analysisState.comments[s.code];
