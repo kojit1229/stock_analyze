@@ -18,6 +18,9 @@
 - wk52       : 52週高値/安値の更新
 - volume     : 出来高急増 (3ヶ月平均のY倍以上)
 - earnings   : 決算発表の前日・当日
+- disclosure : 重要開示 (業績予想修正・配当予想修正・自己株式取得・訂正決算短信)
+- streak     : 3日以上の連続下落/連続上昇 (reactions.json の終値履歴から判定)
+- reaction   : 決算発表への株価反応 (反応日/翌営業日に±X%以上動いた)
 
 依存: Python 標準ライブラリのみ。
 """
@@ -30,16 +33,22 @@ import urllib.request
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
 KEEP_DAYS = 30
+DISC_ALERT_TYPES = ("業績予想修正", "配当予想修正", "自己株式取得", "訂正決算短信")
 
 # 重要度ごとの既定値 (設定画面で未保存の場合に使う)
 DEFAULT_SETTINGS = {
     "email": True,
     "levels": {
-        "5": {"price_move": 1, "pct": 3, "wk52": 1, "volume": 1, "vol_x": 2, "earnings": 1},
-        "4": {"price_move": 1, "pct": 3, "wk52": 1, "volume": 1, "vol_x": 2, "earnings": 1},
-        "3": {"price_move": 1, "pct": 5, "wk52": 0, "volume": 0, "vol_x": 2, "earnings": 1},
-        "2": {"price_move": 0, "pct": 5, "wk52": 0, "volume": 0, "vol_x": 2, "earnings": 1},
-        "1": {"price_move": 0, "pct": 5, "wk52": 0, "volume": 0, "vol_x": 2, "earnings": 0},
+        "5": {"price_move": 1, "pct": 3, "wk52": 1, "volume": 1, "vol_x": 2, "earnings": 1,
+              "disclosure": 1, "streak": 1, "reaction": 1, "rpct": 5},
+        "4": {"price_move": 1, "pct": 3, "wk52": 1, "volume": 1, "vol_x": 2, "earnings": 1,
+              "disclosure": 1, "streak": 1, "reaction": 1, "rpct": 5},
+        "3": {"price_move": 1, "pct": 5, "wk52": 0, "volume": 0, "vol_x": 2, "earnings": 1,
+              "disclosure": 1, "streak": 0, "reaction": 1, "rpct": 5},
+        "2": {"price_move": 0, "pct": 5, "wk52": 0, "volume": 0, "vol_x": 2, "earnings": 1,
+              "disclosure": 1, "streak": 0, "reaction": 0, "rpct": 5},
+        "1": {"price_move": 0, "pct": 5, "wk52": 0, "volume": 0, "vol_x": 2, "earnings": 0,
+              "disclosure": 0, "streak": 0, "reaction": 0, "rpct": 5},
     },
 }
 
@@ -94,12 +103,34 @@ def fnum(v):
     return v if isinstance(v, (int, float)) else None
 
 
-def generate(prices, schedule, mystocks, settings, today):
+def streak_of(tail, code, min_days=3):
+    """終値履歴から連続下落/上昇の日数を返す。(日数, 方向) 方向: -1/+1/0。"""
+    closes = [fnum(v) for v in (tail or {}).get("closes", {}).get(code, [])]
+    closes = [v for v in closes if v is not None]
+    if len(closes) < min_days + 1:
+        return 0, 0
+    n = 0
+    direction = 0
+    for i in range(len(closes) - 1, 0, -1):
+        d = 1 if closes[i] > closes[i - 1] else (-1 if closes[i] < closes[i - 1] else 0)
+        if d == 0:
+            break
+        if direction == 0:
+            direction = d
+        elif d != direction:
+            break
+        n += 1
+    return (n, direction) if n >= min_days else (0, 0)
+
+
+def generate(prices, schedule, mystocks, settings, today, disclosures=None, reactions=None):
     """アラート判定の純粋関数。alerts のリストを返す (dedupe は呼び出し側)。
 
-    prices:   {"date": "YYYY-MM-DD", "stocks": {code: [close, chg%, hi52, lo52, vol, avgVol]}}
-    schedule: [{"code","announce_date","fiscal_type"}...]
-    mystocks: [{"code","importance"}...]
+    prices:      {"date": "YYYY-MM-DD", "stocks": {code: [close, chg%, hi52, lo52, vol, avgVol, ...]}}
+    schedule:    [{"code","announce_date","fiscal_type"}...]
+    mystocks:    [{"code","importance"}...]
+    disclosures: [{"code","doc_type","title","published_at"}...] (本日公表分のみ判定)
+    reactions:   {"tail": {...}, "events": [...]} (track_reactions.py の出力)
     """
     alerts = []
     pstocks = (prices or {}).get("stocks") or {}
@@ -110,6 +141,15 @@ def generate(prices, schedule, mystocks, settings, today):
         d = r.get("announce_date") or ""
         if d in (today, tomorrow):
             sched_by_code.setdefault(str(r.get("code")), []).append(r)
+    disc_by_code = {}
+    for d in disclosures or []:
+        if d.get("doc_type") in DISC_ALERT_TYPES and (d.get("published_at") or "")[:10] == today:
+            disc_by_code.setdefault(str(d.get("code")), []).append(d)
+    tail = (reactions or {}).get("tail") or {}
+    ev_by_code = {}
+    for e in (reactions or {}).get("events") or []:
+        if e.get("t") in ("決算短信", "訂正決算短信"):
+            ev_by_code.setdefault(str(e.get("code")), []).append(e)
 
     for m in mystocks:
         code = m["code"]
@@ -165,6 +205,44 @@ def generate(prices, schedule, mystocks, settings, today):
                     "title": f"{when}決算発表 ({r.get('fiscal_type') or ''})",
                     "detail": f"発表予定日 {r['announce_date']}",
                 })
+        # 重要開示 (業績予想修正・配当予想修正・自己株式取得・訂正決算短信)
+        if conf.get("disclosure"):
+            for d in disc_by_code.get(code, []):
+                alerts.append({
+                    "date": today, "code": code, "importance": imp,
+                    "type": "disclosure_" + d["doc_type"],
+                    "title": f"開示: {d['doc_type']}",
+                    "detail": (d.get("title") or "")[:70],
+                })
+        # 連続下落 / 連続上昇 (3日以上)
+        if conf.get("streak"):
+            n, direction = streak_of(tail, code)
+            if direction:
+                alerts.append({
+                    "date": today, "code": code, "importance": imp,
+                    "type": "streak_down" if direction < 0 else "streak_up",
+                    "title": f"{n}日{'続落' if direction < 0 else '続伸'}",
+                    "detail": "終値ベースの連続" + ("下落" if direction < 0 else "上昇"),
+                })
+        # 決算発表への株価反応 (反応日 / 翌営業日に大きく動いた)
+        if conf.get("reaction"):
+            rpct = float(conf.get("rpct") or 5)
+            for e in ev_by_code.get(code, []):
+                c1, c2 = fnum(e.get("c1")), fnum(e.get("c2"))
+                if e.get("d") == today and c1 is not None and abs(c1) >= rpct:
+                    alerts.append({
+                        "date": today, "code": code, "importance": imp,
+                        "type": "reaction",
+                        "title": f"決算反応 {c1:+.1f}%",
+                        "detail": f"{e.get('t')}への当日反応 (閾値±{rpct:g}%)",
+                    })
+                elif e.get("nd") == today and c2 is not None and abs(c2) >= rpct:
+                    alerts.append({
+                        "date": today, "code": code, "importance": imp,
+                        "type": "reaction",
+                        "title": f"決算翌日 {c2:+.1f}%",
+                        "detail": f"{e.get('t')}の翌営業日反応 (閾値±{rpct:g}%)",
+                    })
     return alerts
 
 
@@ -181,13 +259,17 @@ def create_issue(new_alerts, names, today):
         return False
     owner = repo.split("/")[0]
     icon = {"price_move": "📈", "wk52_high": "🚀", "wk52_low": "🔻",
-            "volume": "📊", "earnings": "📅"}
+            "volume": "📊", "earnings": "📅", "streak_down": "📉",
+            "streak_up": "📈", "reaction": "🎯"}
+
+    def icon_of(t):
+        return "📢" if t.startswith("disclosure") else icon.get(t, "🔔")
     lines = [f"@{owner} マイ銘柄に {len(new_alerts)}件のアラートがあります。", "",
              "| 銘柄 | 重要度 | アラート | 詳細 |", "|---|---|---|---|"]
     for a in sorted(new_alerts, key=lambda x: (-x["importance"], x["code"])):
         name = names.get(a["code"], "")
         star = "★" * max(0, min(5, a["importance"]))
-        lines.append(f"| {a['code']} {name} | {star} | {icon.get(a['type'], '🔔')} "
+        lines.append(f"| {a['code']} {name} | {star} | {icon_of(a['type'])} "
                      f"{a['title']} | {a['detail']} |")
     lines += ["", f"詳細: https://{owner}.github.io/{repo.split('/')[1]}/ のホーム画面",
               "", "> このIssueは決算ナビのアラート機能が自動作成しました。確認後はクローズしてください。"]
@@ -236,6 +318,8 @@ def main():
     schedule = load_json(os.path.join(args.data, "schedule.json"), [])
     stocks = load_json(os.path.join(args.data, "stocks.json"), [])
     names = {s.get("code"): s.get("name", "") for s in stocks if isinstance(s, dict)}
+    disclosures = load_json(os.path.join(args.data, "disclosures.json"), [])
+    reactions = load_json(os.path.join(args.data, "reactions.json"), None)
 
     user = load_json(args.user, None)
     if not user:
@@ -252,7 +336,8 @@ def main():
     old_alerts = existing.get("alerts") or []
     known = {alert_key(a) for a in old_alerts}
 
-    generated = generate(prices, schedule, mystocks, settings, today)
+    generated = generate(prices, schedule, mystocks, settings, today,
+                         disclosures=disclosures, reactions=reactions)
     new_alerts = [a for a in generated if alert_key(a) not in known]
     for a in new_alerts:
         a["name"] = names.get(a["code"], "")

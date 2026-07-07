@@ -230,6 +230,8 @@ DOC_TYPE_RULES = [
     (lambda t: "訂正" in t and "短信" in t, "訂正決算短信"),
     (lambda t: "決算短信" in t, "決算短信"),
     (lambda t: "業績予想" in t, "業績予想修正"),
+    (lambda t: "配当予想" in t or ("配当" in t and "修正" in t), "配当予想修正"),
+    (lambda t: ("自己株式" in t or "自社株" in t) and ("取得" in t or "買付" in t), "自己株式取得"),
     (lambda t: "決算説明" in t, "決算説明資料"),
 ]
 
@@ -509,7 +511,8 @@ def fetch_market_caps(codes, s, crumb):
 
     戻り値: (caps, prices)
       caps:   {code: 時価総額(円)}
-      prices: {code: [終値, 前日比%, 52週高値, 52週安値, 出来高, 平均出来高(3ヶ月)]}
+      prices: {code: [終値, 前日比%, 52週高値, 52週安値, 出来高, 平均出来高(3ヶ月),
+                      配当利回り%, 年間配当(円)]}
     """
     caps = {}
     prices = {}
@@ -523,7 +526,8 @@ def fetch_market_caps(codes, s, crumb):
                 "symbols": ",".join(chunk),
                 "fields": "marketCap,regularMarketPrice,regularMarketChangePercent,"
                           "fiftyTwoWeekHigh,fiftyTwoWeekLow,"
-                          "regularMarketVolume,averageDailyVolume3Month",
+                          "regularMarketVolume,averageDailyVolume3Month,"
+                          "trailingAnnualDividendYield,trailingAnnualDividendRate",
                 "crumb": crumb,
             })
             r.raise_for_status()
@@ -537,6 +541,7 @@ def fetch_market_caps(codes, s, crumb):
                     caps[code] = int(cap)
                 price = q.get("regularMarketPrice")
                 if price is not None:
+                    dy = q.get("trailingAnnualDividendYield")
                     prices[code] = [
                         price,
                         q.get("regularMarketChangePercent"),
@@ -544,6 +549,8 @@ def fetch_market_caps(codes, s, crumb):
                         q.get("fiftyTwoWeekLow"),
                         q.get("regularMarketVolume"),
                         q.get("averageDailyVolume3Month"),
+                        round(dy * 100, 3) if isinstance(dy, (int, float)) else None,
+                        q.get("trailingAnnualDividendRate"),
                     ]
         except Exception as e:  # noqa: BLE001
             fails += 1
