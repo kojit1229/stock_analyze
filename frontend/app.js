@@ -2035,25 +2035,30 @@ async function renderScreenerResult() {
 }
 
 // ---------------------------------------------------------------------------
-// 市況概況タブ (当日の市場全体の状況)
+// 市況概況タブ (当日の市場全体の状況 + 日次スナップショットによる傾向)
+//
+// GitHub Actions (scripts/market_summary.py) が毎営業日の引け後に
+// data/market/YYYY-MM-DD.json (この画面と同じ形の統計) と .md (生成AI向け) を
+// 保存する。当日は prices.json 等から同じ形の統計をその場で計算して表示する。
 // ---------------------------------------------------------------------------
-route("market", async (app) => {
-  app.innerHTML = `
-    <div class="page-head"><h1>市況概況</h1><span class="sub" id="mkt_date"></span></div>
-    <div id="mkt_body"><div class="loading">読み込み中…</div></div>`;
-  const [stocks, prices, reactions, sched] = await Promise.all([
-    loadAllStocks(), loadPrices(), loadReactions(), api.get("/schedule?date_range=this_week"),
-  ]);
-  const body = el("mkt_body");
-  if (!body) return;
-  if (!stocks || !Object.keys(prices.stocks || {}).length) {
-    body.innerHTML = '<div class="empty">市況概況は実データ (frontend/data/) がある環境で利用できます。</div>';
-    return;
-  }
-  const dateEl = el("mkt_date");
-  if (dateEl && prices.date) dateEl.textContent = `${fmtDate(prices.date)} 終値時点 (平日1日5回更新)`;
+const marketState = { date: "" }; // "" = 最新 (当日データから計算)
 
-  // 全銘柄の当日データを結合
+let _mktIndexCache = null;
+async function loadMarketIndex() {
+  if (_mktIndexCache) return _mktIndexCache;
+  try {
+    const res = await fetch("data/market/index.json", { cache: "no-cache" });
+    if (res.ok) {
+      const j = await res.json();
+      if (j && Array.isArray(j.series)) { _mktIndexCache = j; return j; }
+    }
+  } catch (e) { /* 未生成 */ }
+  _mktIndexCache = { dates: [], series: [] };
+  return _mktIndexCache;
+}
+
+// scripts/market_summary.py compute_stats と同じ形の統計オブジェクトを作る
+function computeMarketStats(stocks, prices, reactions, sched, discs) {
   const rows = [];
   for (const s of stocks) {
     const p = prices.stocks[s.code];
@@ -2069,12 +2074,11 @@ route("market", async (app) => {
   const withChg = rows.filter((r) => r.chg != null);
   const up = withChg.filter((r) => r.chg > 0.0001).length;
   const down = withChg.filter((r) => r.chg < -0.0001).length;
-  const flat = withChg.length - up - down;
   const avgChg = withChg.length ? withChg.reduce((s, r) => s + r.chg, 0) / withChg.length : null;
   const capSum = withChg.reduce((s, r) => s + (r.cap || 0), 0);
   const wAvg = capSum ? withChg.reduce((s, r) => s + (r.cap || 0) * r.chg, 0) / capSum : null;
 
-  // 騰落レシオ (終値履歴から。最大25営業日、蓄積中は取得できた日数で計算)
+  // 騰落レシオ (終値履歴から最大25営業日)
   const tail = reactions.tail || { dates: [], closes: {} };
   let ratio = null, ratioDays = 0;
   if (tail.dates.length >= 2) {
@@ -2093,35 +2097,13 @@ route("market", async (app) => {
     }
     if (dec > 0) ratio = (adv / dec) * 100;
   }
-  const ratioJudge = ratio == null ? null
-    : ratio >= 120 ? ["過熱気味", "unread"] : ratio <= 70 ? ["売られすぎ圏", "ok"] : ["中立圏", "market"];
 
-  const chgSpan = (v, digits) => v == null ? "-"
-    : `<span style="color:${v >= 0 ? "#4ade80" : "#f87171"}">${v >= 0 ? "+" : ""}${v.toFixed(digits == null ? 2 : digits)}%</span>`;
-  const stat = (label, value, sub) => `<div class="card stat"><div class="label">${label}</div>
-    <div class="value" style="font-size:22px">${value}</div>${sub ? `<div class="meta-line" style="margin-top:2px">${sub}</div>` : ""}</div>`;
-
-  // ランキングテーブル
-  const nameTd = (r) => `<td class="code-cell"><a class="link" href="#/analysis/${h(r.code)}">${h(r.code)}</a></td>
-    <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h(r.name)}">${h(r.name)}</td>`;
-  const rankTable = (list, cols, headers) => `<div class="table-wrap"><table>
-    <thead><tr><th>コード</th><th>銘柄名</th>${headers.map((x) => `<th>${x}</th>`).join("")}</tr></thead>
-    <tbody>${list.map((r) => `<tr>${nameTd(r)}${cols(r)}</tr>`).join("")}</tbody></table></div>`;
-
-  const byValue = rows.filter((r) => r.value != null).sort((a, b) => b.value - a.value).slice(0, 15);
-  const gainers = [...withChg].sort((a, b) => b.chg - a.chg).slice(0, 10);
-  const losers = [...withChg].sort((a, b) => a.chg - b.chg).slice(0, 10);
   const hi52 = rows.filter((r) => r.close != null && r.hi != null && r.close >= r.hi)
     .sort((a, b) => (b.cap || 0) - (a.cap || 0));
   const lo52 = rows.filter((r) => r.close != null && r.lo != null && r.close <= r.lo)
     .sort((a, b) => (b.cap || 0) - (a.cap || 0));
   const impacts = rows.filter((r) => r.impact != null).sort((a, b) => b.impact - a.impact);
-  const posImp = impacts.filter((r) => r.impact > 0).slice(0, 8);
-  const negImp = impacts.filter((r) => r.impact < 0).slice(-8).reverse();
-  const volSpike = rows.filter((r) => r.vol && r.avg && r.vol >= r.avg * 5)
-    .sort((a, b) => b.vol / b.avg - a.vol / a.avg).slice(0, 10);
 
-  // セクター別 (33業種・時価総額加重)
   const secMap = new Map();
   for (const r of withChg) {
     if (!r.sector) continue;
@@ -2133,40 +2115,155 @@ route("market", async (app) => {
   const sectors = [...secMap.entries()]
     .map(([name, m]) => ({ name, chg: m.cap ? m.wsum / m.cap : m.sum / m.n, n: m.n }))
     .sort((a, b) => b.chg - a.chg);
-  const secMax = Math.max(0.01, ...sectors.map((s) => Math.abs(s.chg)));
-  const sectorBars = sectors.map((s) => {
-    const w = Math.abs(s.chg) / secMax * 100;
-    const color = s.chg >= 0 ? "#22c55e" : "#ef4444";
-    return `<div style="display:flex;align-items:center;gap:8px;padding:2px 0;font-size:12px">
-      <span style="width:110px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h(s.name)} (${s.n}銘柄)">${h(s.name)}</span>
-      <span style="width:64px;flex:none;text-align:right;color:${color}">${s.chg >= 0 ? "+" : ""}${s.chg.toFixed(2)}%</span>
-      <span style="flex:1;height:10px;background:var(--bg-elev);border-radius:4px;overflow:hidden">
-        <span style="display:block;height:100%;width:${w.toFixed(1)}%;background:${color};opacity:.8"></span></span>
-    </div>`;
-  }).join("");
 
-  // 市場区分別 (時価総額加重)
-  const segs = ["プライム", "スタンダード", "グロース"].map((seg) => {
+  const segments = ["プライム", "スタンダード", "グロース"].map((seg) => {
     const rs = withChg.filter((r) => r.market === seg);
     const cs = rs.reduce((s, r) => s + (r.cap || 0), 0);
     return { seg, n: rs.length, chg: cs ? rs.reduce((s, r) => s + (r.cap || 0) * r.chg, 0) / cs : null };
   });
 
-  // 今週の決算予定 (日別件数)
   const byDay = new Map();
   for (const it of (sched.items || [])) byDay.set(it.announce_date, (byDay.get(it.announce_date) || 0) + 1);
-  const days = [...byDay.entries()].sort();
-  const dayMax = Math.max(1, ...days.map(([, n]) => n));
 
+  const discToday = {};
+  const today = prices.date || "";
+  for (const x of (discs.items || [])) {
+    if ((x.published_at || "").slice(0, 10) === today && x.doc_type) {
+      discToday[x.doc_type] = (discToday[x.doc_type] || 0) + 1;
+    }
+  }
+
+  const brief = (r) => ({ code: r.code, name: r.name, close: r.close, chg: r.chg });
+  const stats = {
+    date: prices.date || "",
+    summary: {
+      total: withChg.length, up, down, flat: withChg.length - up - down,
+      avg: avgChg, wavg: wAvg,
+      ratio, ratio_days: ratioDays,
+      ratio_judge: ratio == null ? null : ratio >= 120 ? "過熱気味" : ratio <= 70 ? "売られすぎ圏" : "中立圏",
+      surge: withChg.filter((r) => r.chg >= 8).length,
+      plunge: withChg.filter((r) => r.chg <= -8).length,
+      hi52_count: hi52.length, lo52_count: lo52.length,
+      value_total: rows.reduce((s, r) => s + (r.value || 0), 0),
+      cap_total: capSum,
+      cap_change: rows.reduce((s, r) => s + (r.impact || 0), 0),
+      sectors_up: sectors.filter((x) => x.chg > 0).length,
+      sectors_down: sectors.filter((x) => x.chg < 0).length,
+    },
+    sectors, segments,
+    rank_value: rows.filter((r) => r.value != null).sort((a, b) => b.value - a.value)
+      .slice(0, 15).map((r) => Object.assign(brief(r), { value: r.value })),
+    gainers: [...withChg].sort((a, b) => b.chg - a.chg).slice(0, 10).map(brief),
+    losers: [...withChg].sort((a, b) => a.chg - b.chg).slice(0, 10).map(brief),
+    hi52: hi52.slice(0, 10).map(brief),
+    lo52: lo52.slice(0, 10).map(brief),
+    impact_pos: impacts.filter((r) => r.impact > 0).slice(0, 8)
+      .map((r) => Object.assign(brief(r), { impact: r.impact })),
+    impact_neg: impacts.filter((r) => r.impact < 0).slice(-8).reverse()
+      .map((r) => Object.assign(brief(r), { impact: r.impact })),
+    vol_spike: rows.filter((r) => r.vol && r.avg && r.vol >= r.avg * 5)
+      .sort((a, b) => b.vol / b.avg - a.vol / a.avg).slice(0, 10)
+      .map((r) => Object.assign(brief(r), { x: r.vol / r.avg })),
+    earnings_week: [...byDay.entries()].sort(),
+    disclosures_today: discToday,
+    comment: "",
+  };
+  return stats;
+}
+
+// 主要指標の推移チャート (index.json の時系列から)
+function marketTrendHtml(idx) {
+  const series = idx.series || [];
+  if (series.length < 2) {
+    return `<div class="card" style="margin-bottom:16px">
+      <h2>📈 市況の推移</h2>
+      <div class="empty">市況スナップショットは毎営業日の引け後に自動保存されます (現在${series.length}日分)。
+      2日分以上たまると、騰落レシオ・値上がり銘柄数・新高値/新安値などの推移チャートがここに表示されます。
+      保存されたMD/JSONは <code>frontend/data/market/</code> にあり、MDは生成AIにそのまま渡して傾向を質問できます。</div>
+    </div>`;
+  }
+  const labels = series.map((r) => String(r[0]).slice(5).replace("-", "/"));
+  const col = (i) => series.map((r) => (r[i] == null ? null : r[i]));
+  return `<div class="card" style="margin-bottom:16px">
+    <h2>📈 市況の推移 <span class="count">${series.length}営業日分の日次スナップショット</span></h2>
+    <div class="charts-grid">
+      ${chartSVG({ title: "騰落レシオ", labels, series: [{ name: "騰落レシオ(%)", color: CHART_COLORS[4], values: col(3), type: "line" }] })}
+      ${chartSVG({ title: "値上がり・値下がり銘柄数", labels, series: [
+        { name: "値上がり", color: CHART_COLORS[1], values: col(1), type: "line" },
+        { name: "値下がり", color: "#ef4444", values: col(2), type: "line" }] })}
+      ${chartSVG({ title: "平均騰落率 (時価総額加重)", labels, unit: "pct", series: [{ name: "加重騰落率(%)", color: CHART_COLORS[0], values: col(4), type: "line" }] })}
+      ${chartSVG({ title: "52週高値・安値の更新数", labels, series: [
+        { name: "高値更新", color: CHART_COLORS[1], values: col(5), type: "line" },
+        { name: "安値更新", color: "#ef4444", values: col(6), type: "line" }] })}
+    </div>
+    <div class="meta-line">日次スナップショット (JSON/MD) は <code>frontend/data/market/</code> に保存されています。騰落レシオ120%超は過熱、70%未満は底値圏の目安。</div>
+  </div>`;
+}
+
+function renderMarketHtml(st) {
+  const s = st.summary || {};
+  const chgSpan = (v, digits) => v == null ? "-"
+    : `<span style="color:${v >= 0 ? "#4ade80" : "#f87171"}">${v >= 0 ? "+" : ""}${v.toFixed(digits == null ? 2 : digits)}%</span>`;
+  const stat = (label, value, sub) => `<div class="card stat"><div class="label">${label}</div>
+    <div class="value" style="font-size:22px">${value}</div>${sub ? `<div class="meta-line" style="margin-top:2px">${sub}</div>` : ""}</div>`;
+  const nameTd = (r) => `<td class="code-cell"><a class="link" href="#/analysis/${h(r.code)}">${h(r.code)}</a></td>
+    <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h(r.name)}">${h(r.name)}</td>`;
+  const rankTable = (list, cols, headers) => `<div class="table-wrap"><table>
+    <thead><tr><th>コード</th><th>銘柄名</th>${headers.map((x) => `<th>${x}</th>`).join("")}</tr></thead>
+    <tbody>${(list || []).map((r) => `<tr>${nameTd(r)}${cols(r)}</tr>`).join("")}</tbody></table></div>`;
+  const closeTd = (r) => `<td class="num">${r.close != null ? Number(r.close).toLocaleString("en-US") + "円" : "-"}</td>`;
   const fmtOku = (v) => v == null ? "-" : fmtMoney(v);
-  body.innerHTML = `
+  const num = (v) => (v == null ? "-" : Number(v).toLocaleString("en-US"));
+
+  const sectors = st.sectors || [];
+  const secMax = Math.max(0.01, ...sectors.map((x) => Math.abs(x.chg)));
+  const sectorBars = sectors.map((x) => {
+    const w = Math.abs(x.chg) / secMax * 100;
+    const color = x.chg >= 0 ? "#22c55e" : "#ef4444";
+    return `<div style="display:flex;align-items:center;gap:8px;padding:2px 0;font-size:12px">
+      <span style="width:110px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${h(x.name)} (${x.n}銘柄)">${h(x.name)}</span>
+      <span style="width:64px;flex:none;text-align:right;color:${color}">${x.chg >= 0 ? "+" : ""}${x.chg.toFixed(2)}%</span>
+      <span style="flex:1;height:10px;background:var(--bg-elev);border-radius:4px;overflow:hidden">
+        <span style="display:block;height:100%;width:${w.toFixed(1)}%;background:${color};opacity:.8"></span></span>
+    </div>`;
+  }).join("");
+
+  const days = st.earnings_week || [];
+  const dayMax = Math.max(1, ...days.map((x) => x[1]));
+  const weekTotal = days.reduce((sm, x) => sm + x[1], 0);
+  const discToday = st.disclosures_today || {};
+  const discBadges = Object.keys(discToday).length
+    ? Object.entries(discToday).sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `<span class="badge market" style="font-size:12px;padding:4px 10px">${h(k)} ${v}件</span>`).join(" ")
+    : '<span class="meta-line">本日の決算関連の開示はまだありません</span>';
+  const ratioJudge = s.ratio_judge
+    ? `<span class="badge ${s.ratio >= 120 ? "unread" : s.ratio <= 70 ? "ok" : "market"}">${h(s.ratio_judge)}</span> 120%超=過熱 / 70%未満=底値圏`
+    : "終値履歴の蓄積後に25日で算出";
+
+  return `
+    ${st.comment ? `<div class="card" style="margin-bottom:16px">
+      <h2>📝 概況コメント <span class="count">自動生成</span></h2>
+      <div style="font-size:13px;line-height:1.9">${h(st.comment)}</div>
+    </div>` : ""}
+
+    <div class="grid cols-4" style="margin-bottom:12px;grid-template-columns:repeat(5,1fr)">
+      ${stat("値上がり / 値下がり", `<span style="color:#4ade80">${num(s.up)}</span> / <span style="color:#f87171">${num(s.down)}</span>`, `変わらず ${num(s.flat)} / 全${num(s.total)}銘柄`)}
+      ${stat("平均騰落率 (単純)", chgSpan(s.avg), "全銘柄の単純平均")}
+      ${stat("平均騰落率 (加重)", chgSpan(s.wavg), "時価総額加重 (大型株の影響大)")}
+      ${stat(`騰落レシオ (${s.ratio_days || "-"}日)`, s.ratio == null ? "蓄積中" : s.ratio.toFixed(0) + "%", ratioJudge)}
+      ${stat("急騰 / 急落 (±8%)", `<span style="color:#4ade80">${num(s.surge)}</span> / <span style="color:#f87171">${num(s.plunge)}</span>`, "銘柄数")}
+    </div>
     <div class="grid cols-4" style="margin-bottom:16px;grid-template-columns:repeat(5,1fr)">
-      ${stat("値上がり / 値下がり", `<span style="color:#4ade80">${up.toLocaleString("en-US")}</span> / <span style="color:#f87171">${down.toLocaleString("en-US")}</span>`, `変わらず ${flat} / 全${withChg.length.toLocaleString("en-US")}銘柄`)}
-      ${stat("平均騰落率 (単純)", chgSpan(avgChg), "全銘柄の単純平均")}
-      ${stat("平均騰落率 (加重)", chgSpan(wAvg), "時価総額加重 (大型株の影響大)")}
-      ${stat(`騰落レシオ (${ratioDays || "-"}日)`, ratio == null ? "蓄積中" : ratio.toFixed(0) + "%",
-        ratioJudge ? `<span class="badge ${ratioJudge[1]}">${ratioJudge[0]}</span> 120%超=過熱 / 70%未満=底値圏` : "終値履歴の蓄積後に25日で算出")}
-      ${stat("急騰 / 急落 (±8%)", `<span style="color:#4ade80">${withChg.filter((r) => r.chg >= 8).length}</span> / <span style="color:#f87171">${withChg.filter((r) => r.chg <= -8).length}</span>`, "銘柄数")}
+      ${stat("概算売買代金", fmtOku(s.value_total), "終値×出来高の合計")}
+      ${stat("時価総額合計", fmtOku(s.cap_total), `前日比 <span style="color:${(s.cap_change || 0) >= 0 ? "#4ade80" : "#f87171"}">${(s.cap_change || 0) >= 0 ? "+" : ""}${fmtOku(s.cap_change)}</span>`)}
+      ${stat("上昇 / 下落業種", `<span style="color:#4ade80">${num(s.sectors_up)}</span> / <span style="color:#f87171">${num(s.sectors_down)}</span>`, "東証33業種")}
+      ${stat("ネット新高値", `${(s.hi52_count || 0) - (s.lo52_count || 0) >= 0 ? "+" : ""}${(s.hi52_count || 0) - (s.lo52_count || 0)}`, `52週高値${num(s.hi52_count)} − 安値${num(s.lo52_count)}`)}
+      ${stat("今週の決算発表", num(weekTotal) + "件", '日別の内訳は下部に表示')}
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h2>📢 本日の開示</h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${discBadges}</div>
     </div>
 
     <div class="grid cols-2" style="margin-bottom:16px">
@@ -2176,30 +2273,30 @@ route("market", async (app) => {
       </div>
       <div class="card">
         <h2>💹 売買代金ランキング <span class="count">概算 (終値×出来高)</span></h2>
-        ${rankTable(byValue, (r) => `<td class="num">${fmtOku(r.value)}</td><td class="num">${chgSpan(r.chg)}</td>`, ["売買代金", "前日比"])}
+        ${rankTable(st.rank_value, (r) => `<td class="num">${fmtOku(r.value)}</td><td class="num">${chgSpan(r.chg)}</td>`, ["売買代金", "前日比"])}
       </div>
     </div>
 
     <div class="grid cols-2" style="margin-bottom:16px">
       <div class="card">
         <h2>📈 値上がり率ランキング</h2>
-        ${rankTable(gainers, (r) => `<td class="num">${chgSpan(r.chg)}</td><td class="num">${r.close != null ? Number(r.close).toLocaleString("en-US") + "円" : "-"}</td>`, ["前日比", "終値"])}
+        ${rankTable(st.gainers, (r) => `<td class="num">${chgSpan(r.chg)}</td>${closeTd(r)}`, ["前日比", "終値"])}
       </div>
       <div class="card">
         <h2>📉 値下がり率ランキング</h2>
-        ${rankTable(losers, (r) => `<td class="num">${chgSpan(r.chg)}</td><td class="num">${r.close != null ? Number(r.close).toLocaleString("en-US") + "円" : "-"}</td>`, ["前日比", "終値"])}
+        ${rankTable(st.losers, (r) => `<td class="num">${chgSpan(r.chg)}</td>${closeTd(r)}`, ["前日比", "終値"])}
       </div>
     </div>
 
     <div class="grid cols-2" style="margin-bottom:16px">
       <div class="card">
-        <h2>🚀 52週高値更新 <span class="count">${hi52.length}銘柄</span></h2>
-        ${hi52.length ? rankTable(hi52.slice(0, 10), (r) => `<td class="num">${r.close != null ? Number(r.close).toLocaleString("en-US") + "円" : "-"}</td><td class="num">${chgSpan(r.chg)}</td>`, ["終値", "前日比"]) : '<div class="empty">本日の更新はありません</div>'}
+        <h2>🚀 52週高値更新 <span class="count">${num(s.hi52_count)}銘柄</span></h2>
+        ${(st.hi52 || []).length ? rankTable(st.hi52, (r) => `${closeTd(r)}<td class="num">${chgSpan(r.chg)}</td>`, ["終値", "前日比"]) : '<div class="empty">本日の更新はありません</div>'}
         <div class="meta-line">時価総額の大きい順に表示。データソースの制約で年初来・上場来高値は52週高値で代替しています。</div>
       </div>
       <div class="card">
-        <h2>🔻 52週安値更新 <span class="count">${lo52.length}銘柄</span></h2>
-        ${lo52.length ? rankTable(lo52.slice(0, 10), (r) => `<td class="num">${r.close != null ? Number(r.close).toLocaleString("en-US") + "円" : "-"}</td><td class="num">${chgSpan(r.chg)}</td>`, ["終値", "前日比"]) : '<div class="empty">本日の更新はありません</div>'}
+        <h2>🔻 52週安値更新 <span class="count">${num(s.lo52_count)}銘柄</span></h2>
+        ${(st.lo52 || []).length ? rankTable(st.lo52, (r) => `${closeTd(r)}<td class="num">${chgSpan(r.chg)}</td>`, ["終値", "前日比"]) : '<div class="empty">本日の更新はありません</div>'}
       </div>
     </div>
 
@@ -2207,34 +2304,94 @@ route("market", async (app) => {
       <div class="card">
         <h2>⚖️ 指数インパクト <span class="count">時価総額の増減額 (指数寄与の概算)</span></h2>
         <div class="grid cols-2">
-          <div>${rankTable(posImp, (r) => `<td class="num pos">+${fmtOku(r.impact)}</td>`, ["増加額"])}</div>
-          <div>${rankTable(negImp, (r) => `<td class="num neg">${fmtOku(r.impact)}</td>`, ["減少額"])}</div>
+          <div>${rankTable(st.impact_pos, (r) => `<td class="num pos">+${fmtOku(r.impact)}</td>`, ["増加額"])}</div>
+          <div>${rankTable(st.impact_neg, (r) => `<td class="num neg">${fmtOku(r.impact)}</td>`, ["減少額"])}</div>
         </div>
         <div class="meta-line">全銘柄の時価総額変化額。日経平均は株価加重のため厳密な寄与度とは異なりますが、市場を動かした銘柄の把握に使えます。</div>
       </div>
       <div class="card">
         <h2>📊 出来高急増 <span class="count">3ヶ月平均の5倍以上</span></h2>
-        ${volSpike.length ? rankTable(volSpike, (r) => `<td class="num">${(r.vol / r.avg).toFixed(1)}倍</td><td class="num">${chgSpan(r.chg)}</td>`, ["出来高倍率", "前日比"]) : '<div class="empty">該当なし</div>'}
+        ${(st.vol_spike || []).length ? rankTable(st.vol_spike, (r) => `<td class="num">${(r.x || 0).toFixed(1)}倍</td><td class="num">${chgSpan(r.chg)}</td>`, ["出来高倍率", "前日比"]) : '<div class="empty">該当なし</div>'}
       </div>
     </div>
 
     <div class="grid cols-2">
       <div class="card">
         <h2>🏛 市場区分別騰落 <span class="count">時価総額加重</span></h2>
-        ${segs.map((x) => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">
-          <span>${h(x.seg)} <span class="count">${x.n.toLocaleString("en-US")}銘柄</span></span><span>${chgSpan(x.chg)}</span></div>`).join("")}
+        ${(st.segments || []).map((x) => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">
+          <span>${h(x.seg)} <span class="count">${num(x.n)}銘柄</span></span><span>${chgSpan(x.chg)}</span></div>`).join("")}
       </div>
       <div class="card">
-        <h2>📅 今週の決算発表 <span class="count">${(sched.items || []).length}件</span></h2>
-        ${days.length ? days.map(([d, n]) => `<div style="display:flex;align-items:center;gap:8px;padding:2px 0;font-size:12px">
-          <span style="width:70px;flex:none">${fmtDate(d)}</span>
-          <span style="width:50px;flex:none;text-align:right">${n}件</span>
+        <h2>📅 今週の決算発表 <span class="count">${num(weekTotal)}件</span></h2>
+        ${days.length ? days.map((x) => `<div style="display:flex;align-items:center;gap:8px;padding:2px 0;font-size:12px">
+          <span style="width:70px;flex:none">${fmtDate(x[0])}</span>
+          <span style="width:50px;flex:none;text-align:right">${x[1]}件</span>
           <span style="flex:1;height:10px;background:var(--bg-elev);border-radius:4px;overflow:hidden">
-            <span style="display:block;height:100%;width:${(n / dayMax * 100).toFixed(1)}%;background:var(--accent);opacity:.8"></span></span>
+            <span style="display:block;height:100%;width:${(x[1] / dayMax * 100).toFixed(1)}%;background:var(--accent);opacity:.8"></span></span>
         </div>`).join("") : '<div class="empty">今週の決算予定はありません</div>'}
         <div class="meta-line">決算集中日は値動きが大きくなりやすい点に注意。<a class="link" href="#/schedule">決算予定タブ</a>で詳細を確認できます。</div>
       </div>
     </div>`;
+}
+
+route("market", async (app) => {
+  const idx = await loadMarketIndex();
+  const dateOpts = [...(idx.dates || [])].reverse();
+  app.innerHTML = `
+    <div class="page-head"><h1>市況概況</h1><span class="sub" id="mkt_date"></span>
+      <span style="margin-left:auto;display:inline-flex;gap:8px;align-items:center">
+        <select id="mkt_sel" style="width:auto" title="保存済みの過去の市況を表示">
+          <option value="">最新 (本日)</option>
+          ${dateOpts.map((d) => `<option value="${h(d)}" ${marketState.date === d ? "selected" : ""}>${h(d)}</option>`).join("")}
+        </select>
+        <a class="btn small ghost" id="mkt_md" target="_blank" rel="noopener" style="display:none" title="生成AIに渡しやすいMarkdown形式のレポートを開く">📝 MDレポート</a>
+      </span></div>
+    <div id="mkt_trend"></div>
+    <div id="mkt_body"><div class="loading">読み込み中…</div></div>`;
+  el("mkt_sel").onchange = () => {
+    marketState.date = el("mkt_sel").value;
+    render();
+  };
+  el("mkt_trend").innerHTML = marketTrendHtml(idx);
+
+  const body = el("mkt_body");
+  let stats = null;
+  if (marketState.date) {
+    try {
+      const res = await fetch("data/market/" + marketState.date + ".json", { cache: "no-cache" });
+      if (res.ok) stats = await res.json();
+    } catch (e) { /* 下でエラー表示 */ }
+    if (!stats) {
+      if (body.isConnected) body.innerHTML = '<div class="empty">この日のスナップショットを読み込めませんでした。</div>';
+      return;
+    }
+  } else {
+    const [stocks, prices, reactions, sched, discs] = await Promise.all([
+      loadAllStocks(), loadPrices(), loadReactions(),
+      api.get("/schedule?date_range=this_week"), api.get("/disclosures"),
+    ]);
+    if (!stocks || !Object.keys(prices.stocks || {}).length) {
+      if (body.isConnected) body.innerHTML = '<div class="empty">市況概況は実データ (frontend/data/) がある環境で利用できます。</div>';
+      return;
+    }
+    stats = computeMarketStats(stocks, prices, reactions, sched, discs);
+    // 当日分のスナップショットが保存済みなら、概況コメントを取り込む
+    if ((idx.dates || []).includes(stats.date)) {
+      try {
+        const res = await fetch("data/market/" + stats.date + ".json", { cache: "no-cache" });
+        if (res.ok) stats.comment = ((await res.json()) || {}).comment || "";
+      } catch (e) { /* 無くてもよい */ }
+    }
+  }
+  if (!body.isConnected) return;
+  const dEl = el("mkt_date");
+  if (dEl && stats.date) dEl.textContent = `${fmtDate(stats.date)} 終値時点${marketState.date ? " (保存版)" : " (平日1日5回更新)"}`;
+  if ((idx.dates || []).includes(stats.date)) {
+    const a = el("mkt_md");
+    a.href = "data/market/" + stats.date + ".md";
+    a.style.display = "";
+  }
+  body.innerHTML = renderMarketHtml(stats);
 });
 
 // 決算シグナル + 投資指標カード (銘柄分析タブ)

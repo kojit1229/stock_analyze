@@ -33,6 +33,9 @@ jobs:
       - name: Track price reactions (イベント→株価反応の記録)
         continue-on-error: true
         run: python scripts/track_reactions.py --data frontend/data
+      - name: Market summary snapshot (市況概況の日次保存 JSON+MD)
+        continue-on-error: true
+        run: python scripts/market_summary.py --data frontend/data
       - name: Generate price alerts (マイ銘柄の終値アラート)
         continue-on-error: true
         env:
