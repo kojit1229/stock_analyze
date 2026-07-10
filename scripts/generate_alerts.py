@@ -21,8 +21,11 @@
 - disclosure : 重要開示 (業績予想修正・配当予想修正・自己株式取得・訂正決算短信)
   - 業績予想修正/配当予想修正は開示タイトルから上方・下方/増配・減配を判定できれば
     より具体的な種別 (例: disclosure_業績予想上方修正) にする (決算サプライズ検出)。
-- surprise   : 決算サプライズ (frontend/data/financials.json の構造化数値のみ使用。
-    PDF本文はパースしない)。黒字転換・営業利益の最高益更新を検出する。
+- surprise   : 決算サプライズ (frontend/data/financials.json の構造化数値が基本。
+    当日更新分は取得できれば決算短信サマリーXBRL (xbrl_parser.py) の連結営業利益で
+    上書きし、より確実な確定値にする。XBRL取得・解析に失敗した場合は Yahoo 由来値
+    へフォールバックする (フォールバックした旨は必ずログに出す)。PDF本文はパース
+    しない — 対象はXBRLタグのみ)。黒字転換・営業利益の最高益更新を検出する。
 - streak     : 3日以上の連続下落/連続上昇 (reactions.json の終値履歴から判定)
 - reaction   : 決算発表への株価反応 (反応日/翌営業日に±X%以上動いた)
 
@@ -30,10 +33,19 @@
 """
 import argparse
 import datetime
+import importlib.util
 import json
 import os
 import sys
 import urllib.request
+
+# xbrl_parser.py は scripts/ 内の同居モジュール。generate_alerts.py がテストから
+# importlib 経由で読み込まれる場合でも解決できるよう、パスを直接指定して読み込む
+# (通常の `import xbrl_parser` は sys.path に scripts/ が無いと失敗するため)。
+_xbrl_spec = importlib.util.spec_from_file_location(
+    "xbrl_parser", os.path.join(os.path.dirname(__file__), "xbrl_parser.py"))
+xbrl_parser = importlib.util.module_from_spec(_xbrl_spec)
+_xbrl_spec.loader.exec_module(xbrl_parser)
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
 KEEP_DAYS = 30
@@ -154,12 +166,47 @@ def classify_surprise_type(doc_type, title):
     return None
 
 
-def financial_surprises(financials, mystocks, today):
-    """financials.json (Yahoo/XBRL由来の構造化決算数値。PDF本文は使わない) から
+def xbrl_confirmed_operating_income(code, xbrl_lookup):
+    """xbrl_lookup(code) で決算短信サマリーXBRLを取得できれば、そこから
+    連結優先(単体劣後)の営業利益を返す。取得できない・解析に失敗した場合は
+    None を返し、その旨をログに出す(黙殺しない。設計原則4)。
+
+    xbrl_lookup: callable(code) -> bytes|None。実際のTDnetからの取得経路は
+    本チケットの範囲外(実ネットワークアクセスはテスト対象外のため)。呼び出し
+    元がフィクスチャや将来のキャッシュ実装を注入できるよう依存性注入にしている。
+    """
+    if xbrl_lookup is None:
+        return None
+    try:
+        xbrl_bytes = xbrl_lookup(code)
+    except Exception as e:  # noqa: BLE001 — 取得経路の例外は握りつぶさずログにする
+        log(f"XBRL取得失敗 ({code}): {type(e).__name__}: {e} — Yahoo由来値にフォールバックします")
+        return None
+    if not xbrl_bytes:
+        return None
+    try:
+        parsed = xbrl_parser.parse_summary(xbrl_bytes)
+    except xbrl_parser.XbrlParseError as e:
+        log(f"XBRL解析失敗 ({code}): {e} — Yahoo由来値にフォールバックします")
+        return None
+    op = parsed.get("operating_income")
+    if op is None:
+        log(f"XBRLに営業利益が無い ({code}) — Yahoo由来値にフォールバックします")
+        return None
+    return op
+
+
+def financial_surprises(financials, mystocks, today, xbrl_lookup=None):
+    """financials.json (Yahoo由来の構造化決算数値。PDF本文は使わない) から
     営業利益の黒字転換・最高益更新を検出する。
 
     当日 (今回のパイプライン実行) にデータ更新があった銘柄 (t == today) の
     最新年度のみを判定対象にする (古いデータで繰り返しアラートが出ないため)。
+
+    xbrl_lookup が渡された場合、当日分の営業利益は決算短信サマリーXBRL
+    (xbrl_parser.py) から取得できればそちらを優先する(決算当日の確定値を
+    より確実にするため)。取得・解析に失敗した場合は Yahoo 由来の値へ
+    フォールバックする。
     """
     alerts = []
     stocks_fin = (financials or {}).get("stocks") or {}
@@ -175,6 +222,9 @@ def financial_surprises(financials, mystocks, today):
         latest, prev = annual[-1], annual[-2]
         latest_op = fnum(latest[2]) if len(latest) > 2 else None
         prev_op = fnum(prev[2]) if len(prev) > 2 else None
+        xbrl_op = xbrl_confirmed_operating_income(code, xbrl_lookup)
+        if xbrl_op is not None:
+            latest_op = xbrl_op
         if latest_op is None:
             continue
         imp = m.get("importance") or 3
@@ -198,7 +248,7 @@ def financial_surprises(financials, mystocks, today):
 
 
 def generate(prices, schedule, mystocks, settings, today, disclosures=None, reactions=None,
-             financials=None):
+             financials=None, xbrl_lookup=None):
     """アラート判定の純粋関数。alerts のリストを返す (dedupe は呼び出し側)。
 
     prices:      {"date": "YYYY-MM-DD", "stocks": {code: [close, chg%, hi52, lo52, vol, avgVol, ...]}}
@@ -208,6 +258,9 @@ def generate(prices, schedule, mystocks, settings, today, disclosures=None, reac
     reactions:   {"tail": {...}, "events": [...]} (track_reactions.py の出力)
     financials:  {"stocks": {code: {"a": [[期末日,売上高,営業利益,純利益,EPS]...], "t": "YYYY-MM-DD"}}}
                  (frontend/data/financials.json。構造化数値のみ使用しPDFはパースしない)
+    xbrl_lookup: callable(code) -> bytes|None (省略時は None)。決算サプライズ判定の
+                 営業利益を決算短信サマリーXBRLから取得できる場合に渡す。取得・解析に
+                 失敗した場合は financials (Yahoo由来) の値へ自動フォールバックする。
     """
     alerts = []
     pstocks = (prices or {}).get("stocks") or {}
@@ -294,7 +347,7 @@ def generate(prices, schedule, mystocks, settings, today, disclosures=None, reac
                     "detail": (d.get("title") or "")[:70],
                 })
             # 決算サプライズ (黒字転換・最高益) — XBRL/Yahoo由来の構造化数値のみで判定
-            alerts.extend(financial_surprises(financials, [m], today))
+            alerts.extend(financial_surprises(financials, [m], today, xbrl_lookup=xbrl_lookup))
         # 連続下落 / 連続上昇 (3日以上)
         if conf.get("streak"):
             n, direction = streak_of(tail, code)
@@ -424,6 +477,10 @@ def main():
         disclosures = load_json(os.path.join(args.data, "disclosures.json"), [])
         reactions = load_json(os.path.join(args.data, "reactions.json"), None)
         financials = load_json(os.path.join(args.data, "financials.json"), None)
+        # xbrl_lookup: 決算短信サマリーXBRLをTDnetから取得してキャッシュする経路は
+        # 未実装 (別チケット。実ネットワークアクセスを伴うため本チケットの範囲外)。
+        # 未配線の間は financial_surprises() が Yahoo由来の financials.json のみで
+        # 判定する (xbrl_lookup=None は完全な後方互換)。
         generated = generate(prices, schedule, mystocks, settings, today,
                              disclosures=disclosures, reactions=reactions, financials=financials)
     else:

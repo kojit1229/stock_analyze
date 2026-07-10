@@ -244,6 +244,108 @@ class TestGenerate(unittest.TestCase):
         self.assertIn("surprise_turnaround", types)
         self.assertNotIn("surprise_record_profit", types)  # 過去(50.0)を超えていない
 
+    # T-3: 決算サプライズ判定へのXBRL(決算短信サマリー)統合 + フォールバック -----
+
+    XBRL_HIGH_OP_INCOME = b"""<?xml version="1.0" encoding="UTF-8"?>
+<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"
+            xmlns:tse-ed-t="http://www.xbrl.tdnet.info/jp/br/tdnet/t/ed/2013-08-31">
+  <tse-ed-t:OperatingIncome contextRef="CurrentYearDuration_ConsolidatedMember" unitRef="JPY">999</tse-ed-t:OperatingIncome>
+</xbrli:xbrl>"""
+
+    def test_xbrl_confirmed_value_overrides_yahoo_for_surprise_detection(self):
+        """XBRLから取得できた営業利益がYahoo由来値より優先されること。
+        Yahoo由来 (5.0) では過去最高 (50.0) を更新しないが、XBRL確定値 (999) では
+        更新する — override が実際に判定へ反映されることを確認する。"""
+        financials = {"stocks": {"1301": {
+            "a": [["2024-03-31", 100.0, 50.0, 40.0, 3.0],
+                  ["2025-03-31", 90.0, -20.0, -25.0, -2.0],
+                  ["2026-03-31", 95.0, 5.0, 3.0, 0.3]],
+            "t": "2026-07-07",
+        }}}
+        lookup = lambda code: self.XBRL_HIGH_OP_INCOME if code == "1301" else None
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3}], None,
+                          "2026-07-07", financials=financials, xbrl_lookup=lookup)
+        types = {a["type"] for a in out if a["type"].startswith("surprise_")}
+        self.assertIn("surprise_record_profit", types)
+        detail = next(a["detail"] for a in out if a["type"] == "surprise_record_profit")
+        self.assertIn("999", detail)  # XBRL確定値が採用されている
+
+    def test_xbrl_parse_failure_falls_back_to_yahoo_and_logs(self):
+        """不正なXBRL(パース不能)を返す xbrl_lookup を渡しても例外にならず、
+        Yahoo由来値にフォールバックし、その旨がログに出ること(黙殺しない)。"""
+        financials = {"stocks": {"1301": {
+            "a": [["2024-03-31", 100.0, 50.0, 40.0, 3.0],
+                  ["2025-03-31", 90.0, -20.0, -25.0, -2.0],
+                  ["2026-03-31", 95.0, 5.0, 3.0, 0.3]],
+            "t": "2026-07-07",
+        }}}
+        lookup = lambda code: b"<not-well-formed"
+        logs = []
+        orig_log = ga.log
+        ga.log = lambda msg: logs.append(msg)
+        try:
+            out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3}], None,
+                              "2026-07-07", financials=financials, xbrl_lookup=lookup)
+        finally:
+            ga.log = orig_log
+        types = {a["type"] for a in out if a["type"].startswith("surprise_")}
+        # Yahoo由来 (5.0) は過去最高 (50.0) を更新しないのでrecord_profitは出ない
+        self.assertNotIn("surprise_record_profit", types)
+        self.assertIn("surprise_turnaround", types)  # Yahoo由来値でのフォールバック判定は継続する
+        self.assertTrue(any("XBRL解析失敗" in m and "フォールバック" in m for m in logs))
+
+    def test_xbrl_lookup_exception_falls_back_to_yahoo_and_logs(self):
+        """xbrl_lookup が例外を送出しても generate() 全体は落ちず、Yahoo由来値へ
+        フォールバックしてログに残ること。"""
+        financials = {"stocks": {"1301": {
+            "a": [["2025-03-31", 100.0, -10.0, -10.0, -1.0],
+                  ["2026-03-31", 130.0, 20.0, 15.0, 1.5]],
+            "t": "2026-07-07",
+        }}}
+
+        def boom(code):
+            raise ConnectionError("TDnetに接続できません")
+
+        logs = []
+        orig_log = ga.log
+        ga.log = lambda msg: logs.append(msg)
+        try:
+            out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3}], None,
+                              "2026-07-07", financials=financials, xbrl_lookup=boom)
+        finally:
+            ga.log = orig_log
+        types = {a["type"] for a in out if a["type"].startswith("surprise_")}
+        self.assertIn("surprise_turnaround", types)  # Yahoo由来値でのフォールバック判定は継続する
+        self.assertTrue(any("XBRL取得失敗" in m and "フォールバック" in m for m in logs))
+
+    def test_xbrl_lookup_returns_none_falls_back_silently(self):
+        """該当銘柄のXBRLが無い (None) 場合も例外にならず、Yahoo由来値で
+        通常どおり判定されること。"""
+        financials = {"stocks": {"1301": {
+            "a": [["2025-03-31", 100.0, -10.0, -10.0, -1.0],
+                  ["2026-03-31", 130.0, 20.0, 15.0, 1.5]],
+            "t": "2026-07-07",
+        }}}
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3}], None,
+                          "2026-07-07", financials=financials, xbrl_lookup=lambda code: None)
+        types = {a["type"] for a in out if a["type"].startswith("surprise_")}
+        self.assertIn("surprise_turnaround", types)
+
+    def test_xbrl_lookup_not_provided_matches_prior_behavior(self):
+        """xbrl_lookup 省略時 (既定 None) は従来どおり Yahoo由来値のみで判定される
+        (後方互換の確認)。"""
+        financials = {"stocks": {"1301": {
+            "a": [["2024-03-31", 100.0, -50.0, -60.0, -1.0],
+                  ["2025-03-31", 110.0, 10.0, 5.0, 0.5],
+                  ["2026-03-31", 130.0, 200.0, 150.0, 15.0]],
+            "t": "2026-07-07",
+        }}}
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3}], None,
+                          "2026-07-07", financials=financials)
+        types = {a["type"] for a in out if a["type"].startswith("surprise_")}
+        self.assertIn("surprise_record_profit", types)
+        self.assertNotIn("surprise_turnaround", types)
+
     def test_should_include_price_alerts_gate(self):
         # 15時より前は株価系アラート不可 (force無し)
         morning = datetime.datetime(2026, 7, 7, 9, 5, tzinfo=ga.JST)
