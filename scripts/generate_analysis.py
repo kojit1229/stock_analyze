@@ -242,7 +242,14 @@ def create_issue(item, now):
         return False
 
 
-def run(data_dir, watchlist_path, user_path, api_key, now, call_fn=call_claude, notify_fn=create_issue):
+def run(data_dir, watchlist_path, user_path, api_key, now, call_fn=call_claude, notify_fn=create_issue,
+        max_items=3, max_cost_usd=1.0, get_cost_fn=get_cli_cost_total):
+    """AI決算分析を生成する。1回の実行で処理する開示数は max_items で上限を
+    設ける(watchlist/マイ銘柄に未処理短信が多い場合のコスト暴発を防ぐ)。
+    また各アイテムの処理前に get_cost_fn() の累積コストを確認し、
+    max_cost_usd に達していれば「上限到達」をログしてそこで打ち切る
+    (exit≠0にはせず正常終了。api backendはコストを計測しないため常に0扱いで
+    このゲートは事実上claude-cli backend専用)。"""
     codes = target_codes(watchlist_path, user_path)
     if not codes:
         log("分析対象銘柄(pdf_watchlist/マイ銘柄)が無いため終了")
@@ -251,10 +258,18 @@ def run(data_dir, watchlist_path, user_path, api_key, now, call_fn=call_claude, 
     if not pending:
         log("新規の分析対象開示が無いため終了")
         return []
+    if len(pending) > max_items:
+        log(f"保留{len(pending)}件のうち上限{max_items}件のみ処理します(--max-items)")
+    targets = pending[:max_items]
     stocks = load_json(os.path.join(data_dir, "stocks.json"), []) or []
     names = {s.get("code"): s.get("name", "") for s in stocks if isinstance(s, dict)}
     saved = []
-    for d in pending:
+    for d in targets:
+        cost_so_far = get_cost_fn()
+        if cost_so_far >= max_cost_usd:
+            log(f"累積コスト上限(${max_cost_usd:.2f})に到達したため以降の生成を中止します"
+                f"(処理済み{len(saved)}/{len(targets)}件、現在のコスト ${cost_so_far:.4f})")
+            break
         code = str(d.get("code"))
         material = bai.build_analysis_input(code, d, data_dir)
         text = call_fn(material, api_key)
@@ -280,6 +295,10 @@ def main():
     ap.add_argument("--backend", choices=("api", "claude-cli"), default="api",
                      help="api=Claude API (既定・要ANTHROPIC_API_KEY) / "
                           "claude-cli=ローカルclaude CLI (サブスクリプション認証、ローカルバッチ用)")
+    ap.add_argument("--max-items", type=int, default=3,
+                     help="1回の実行で処理する開示数の上限(既定3。コスト暴発防止)")
+    ap.add_argument("--max-cost-usd", type=float, default=1.0,
+                     help="累積コスト(USD)がこれを超えたら以降の生成を中止する(既定1.0)")
     args = ap.parse_args()
     if args.backend == "claude-cli":
         reset_cli_cost_total()
@@ -292,7 +311,8 @@ def main():
         call_fn = call_claude
     now = datetime.datetime.now(JST)
     try:
-        run(args.data, args.watchlist, args.user, api_key, now, call_fn=call_fn)
+        run(args.data, args.watchlist, args.user, api_key, now, call_fn=call_fn,
+            max_items=args.max_items, max_cost_usd=args.max_cost_usd)
     except urllib.error.URLError as e:
         log(f"Claude API呼び出しに失敗したため終了: {e}")
         sys.exit(1)

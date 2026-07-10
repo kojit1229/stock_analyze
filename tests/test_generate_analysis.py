@@ -144,6 +144,63 @@ class TestRun(unittest.TestCase):
                              call_fn=lambda m, k: "x", notify_fn=lambda item, now: True)
             self.assertEqual(saved, [])
 
+    def test_max_items_limits_processed_disclosures_per_run(self):
+        """W2-2: --max-items 相当。保留件数が上限を超えても、1回の実行では
+        上限件数だけ処理し残りは次回実行に持ち越す(seen.jsonに書かれないので
+        再実行すれば拾われる)。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = _setup_data_dir(tmp, codes=("8125", "6506", "9972"))
+            wl_path, user_path = _setup_config(tmp, watchlist_codes=["8125", "6506", "9972"])
+            calls = []
+
+            def fake_call(material, api_key):
+                calls.append(material["code"])
+                return "分析結果テキスト"
+
+            saved = gan.run(data_dir, wl_path, user_path, "dummy-key", NOW,
+                             call_fn=fake_call, notify_fn=lambda item, now: True,
+                             max_items=2, max_cost_usd=999.0)
+            self.assertEqual(len(saved), 2)
+            self.assertEqual(len(calls), 2)
+            # 上限に阻まれた1件はseen.jsonに残らないので再実行で拾われる
+            remaining = gan.pending_disclosures(
+                data_dir, gan.target_codes(wl_path, user_path), gan.seen_ids_of(data_dir))
+            self.assertEqual(len(remaining), 1)
+
+    def test_max_cost_usd_stops_generation_without_raising(self):
+        """W2-2: --max-cost-usd 相当。累積コストが上限に達したら例外を出さず
+        (exit≠0にならず)そこで処理を打ち切ること。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = _setup_data_dir(tmp, codes=("8125", "6506", "9972"))
+            wl_path, user_path = _setup_config(tmp, watchlist_codes=["8125", "6506", "9972"])
+            calls = []
+
+            def fake_call(material, api_key):
+                calls.append(material["code"])
+                return "分析結果テキスト"
+
+            # 1件処理した時点で上限(0.5)を超えるコスト関数を注入する
+            costs = iter([0.0, 0.6, 0.6])
+
+            def fake_get_cost():
+                return next(costs, 0.6)
+
+            saved = gan.run(data_dir, wl_path, user_path, "dummy-key", NOW,
+                             call_fn=fake_call, notify_fn=lambda item, now: True,
+                             max_items=10, max_cost_usd=0.5, get_cost_fn=fake_get_cost)
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(len(calls), 1)
+
+    def test_max_cost_usd_reached_before_first_item_generates_nothing(self):
+        """既に上限を超えている場合は1件も生成しない(正常終了)。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = _setup_data_dir(tmp, codes=("8125",))
+            wl_path, user_path = _setup_config(tmp, watchlist_codes=["8125"])
+            saved = gan.run(data_dir, wl_path, user_path, "dummy-key", NOW,
+                             call_fn=lambda m, k: "x", notify_fn=lambda item, now: True,
+                             max_cost_usd=1.0, get_cost_fn=lambda: 1.5)
+            self.assertEqual(saved, [])
+
     def test_api_failure_is_not_swallowed(self):
         """API失敗時はexit≠0につながるよう例外をそのまま伝播する(黙殺しない)。"""
         with tempfile.TemporaryDirectory() as tmp:
