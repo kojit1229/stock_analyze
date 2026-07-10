@@ -3,8 +3,10 @@ import datetime
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 _spec = importlib.util.spec_from_file_location(
     "generate_analysis",
@@ -115,6 +117,65 @@ class TestRun(unittest.TestCase):
                         call_fn=failing_call, notify_fn=lambda item, now: True)
             # 失敗時はmanifestを更新しない(中途半端な処理済み記録を残さない)
             self.assertEqual(gan.seen_ids_of(data_dir), set())
+
+
+class TestCallClaudeCli(unittest.TestCase):
+    """claude-cli バックエンド (ローカルタスクスケジューラ用)。subprocess.run をモックする。"""
+
+    MATERIAL = {
+        "code": "8125",
+        "disclosure": {"title": "決算短信のお知らせ", "doc_type": "決算短信", "published_at": "2026-07-09T16:00:00"},
+        "actuals": {"annual": [], "quarterly": []},
+        "growth_signal": None, "margin_signal": None, "progress": None,
+        "revision_signal": None, "revision_disclosures": [],
+        "market_context_md": "値上がり優勢。", "market_context_date": "2026-07-09",
+    }
+
+    def _run_result(self, returncode=0, stdout="", stderr=""):
+        return subprocess.CompletedProcess(args=["claude"], returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_parses_result_field_from_json_output(self):
+        raw = json.dumps({"is_error": False, "result": "分析結果テキスト"})
+        with mock.patch("subprocess.run", return_value=self._run_result(0, raw)) as m:
+            text = gan.call_claude_cli(self.MATERIAL)
+        self.assertEqual(text, "分析結果テキスト")
+        cmd = m.call_args.args[0]
+        self.assertIn("--output-format", cmd)
+        self.assertIn("--system-prompt", cmd)
+
+    def test_uses_claude_bin_env_override(self):
+        raw = json.dumps({"is_error": False, "result": "ok"})
+        with mock.patch.dict(os.environ, {"CLAUDE_BIN": "/custom/claude"}):
+            with mock.patch("subprocess.run", return_value=self._run_result(0, raw)) as m:
+                gan.call_claude_cli(self.MATERIAL)
+        self.assertEqual(m.call_args.args[0][0], "/custom/claude")
+
+    def test_nonzero_exit_raises(self):
+        with mock.patch("subprocess.run", return_value=self._run_result(1, "", "boom")):
+            with self.assertRaises(RuntimeError):
+                gan.call_claude_cli(self.MATERIAL)
+
+    def test_is_error_response_raises(self):
+        raw = json.dumps({"is_error": True, "result": "エラー内容"})
+        with mock.patch("subprocess.run", return_value=self._run_result(0, raw)):
+            with self.assertRaises(RuntimeError):
+                gan.call_claude_cli(self.MATERIAL)
+
+    def test_invalid_json_output_raises(self):
+        with mock.patch("subprocess.run", return_value=self._run_result(0, "not json")):
+            with self.assertRaises(RuntimeError):
+                gan.call_claude_cli(self.MATERIAL)
+
+    def test_empty_result_raises(self):
+        raw = json.dumps({"is_error": False, "result": "   "})
+        with mock.patch("subprocess.run", return_value=self._run_result(0, raw)):
+            with self.assertRaises(RuntimeError):
+                gan.call_claude_cli(self.MATERIAL)
+
+    def test_launch_failure_raises(self):
+        with mock.patch("subprocess.run", side_effect=OSError("not found")):
+            with self.assertRaises(RuntimeError):
+                gan.call_claude_cli(self.MATERIAL)
 
 
 class TestCreateIssue(unittest.TestCase):

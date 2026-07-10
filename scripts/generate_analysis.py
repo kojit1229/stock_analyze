@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """AI決算分析の生成・保存 (Phase2 P2-2)。
 
-build_analysis_input.py が組み立てた素材を Claude API (Messages API) へ渡し、
+build_analysis_input.py が組み立てた素材を Claude へ渡し、
 frontend/data/analysis/<code>_<disclosure_id>.md に分析結果を保存する。
 frontend/data/analysis/seen.json に処理済み disclosure_id を記録して冪等にする
 (このファイルはフロントエンドの一覧表示用 manifest も兼ねる)。
+
+バックエンドは2種類 (--backend で選択、既定は api で後方互換):
+- api        : Claude API (Messages API) を直接呼ぶ (要 ANTHROPIC_API_KEY)。GitHub Actions用。
+- claude-cli : ローカルの claude CLI (`claude -p`) をサブスクリプション認証で呼ぶ。
+               ANTHROPIC_API_KEY 不要。Windowsタスクスケジューラ経由のローカルバッチ用
+               (2026-07-10 承認。ワークスペースの loop/collect-invest.sh と同じ
+               `claude -p --output-format json` 呼び出しパターンを踏襲)。
 
 対象: config/pdf_watchlist.json の codes ∪ config/user_data.json のマイ銘柄
       (コスト抑制のため全銘柄には広げない)。
@@ -12,12 +19,13 @@ API失敗時は例外を送出してプロセスを exit≠0 で終了する(黙
 出力に生成AIの分析結果を含むため、短期売買シグナルではなく事実確認・乖離指摘に
 限定するようシステムプロンプトで指示する(FI原則)。
 
-依存: Python 標準ライブラリのみ (urllib.request で Messages API を呼ぶ)。
+依存: Python 標準ライブラリのみ (urllib.request で Messages API、subprocess で claude CLI を呼ぶ)。
 """
 import argparse
 import datetime
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -79,8 +87,8 @@ def pending_disclosures(data_dir, codes, seen_ids):
     return out
 
 
-def call_claude(material, api_key):
-    prompt = (
+def build_prompt(material):
+    return (
         f"銘柄コード: {material['code']}\n"
         f"開示: {material['disclosure']['title']} ({material['disclosure']['doc_type']}, "
         f"{material['disclosure']['published_at']})\n\n"
@@ -91,6 +99,10 @@ def call_claude(material, api_key):
         f"業績予想修正シグナル: {material['revision_signal']} / 関連開示: {material['revision_disclosures']}\n\n"
         f"市況概況({material['market_context_date']}):\n{material['market_context_md']}\n"
     )
+
+
+def call_claude(material, api_key):
+    prompt = build_prompt(material)
     body = json.dumps({
         "model": MODEL, "max_tokens": 1500, "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": prompt}],
@@ -103,6 +115,37 @@ def call_claude(material, api_key):
     text = "\n".join(b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text").strip()
     if not text:
         raise RuntimeError("Claude APIの応答にテキストが含まれていません")
+    return text
+
+
+def call_claude_cli(material, api_key=None):
+    """ローカルの claude CLI (`claude -p`) をヘッドレス実行して分析テキストを得る。
+    ANTHROPIC_API_KEY は不要 (CLIのサブスクリプション認証を使う)。api_key引数は
+    call_claude とシグネチャを揃えるためだけに存在し、未使用。
+    loop/collect-invest.sh の claude 呼び出しパターン(--output-format json,
+    stdinでプロンプト投入)を踏襲する。"""
+    prompt = build_prompt(material)
+    claude_bin = os.environ.get("CLAUDE_BIN", "claude")
+    cmd = [claude_bin, "-p", "--model", MODEL, "--output-format", "json",
+           "--system-prompt", SYSTEM_PROMPT, "--allowedTools", ""]
+    try:
+        proc = subprocess.run(
+            cmd, input=prompt, capture_output=True, text=True, encoding="utf-8",
+            timeout=180, check=False)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"claude CLIの起動に失敗しました: {e}") from e
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"claude CLIが失敗しました (exit={proc.returncode}): {(proc.stderr or '').strip()[:500]}")
+    try:
+        resp = json.loads(proc.stdout)
+    except ValueError as e:
+        raise RuntimeError(f"claude CLIの出力をJSONとして解析できません: {e}") from e
+    if resp.get("is_error"):
+        raise RuntimeError(f"claude CLIがエラーを返しました: {resp.get('result')}")
+    text = (resp.get("result") or "").strip()
+    if not text:
+        raise RuntimeError("claude CLIの応答にテキストが含まれていません")
     return text
 
 
@@ -203,19 +246,29 @@ def main():
     ap.add_argument("--data", default="frontend/data")
     ap.add_argument("--watchlist", default="config/pdf_watchlist.json")
     ap.add_argument("--user", default="config/user_data.json")
+    ap.add_argument("--backend", choices=("api", "claude-cli"), default="api",
+                     help="api=Claude API (既定・要ANTHROPIC_API_KEY) / "
+                          "claude-cli=ローカルclaude CLI (サブスクリプション認証、ローカルバッチ用)")
     args = ap.parse_args()
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        log("ANTHROPIC_API_KEY が無いため終了")
-        sys.exit(1)
+    if args.backend == "claude-cli":
+        call_fn, api_key = call_claude_cli, None
+    else:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            log("ANTHROPIC_API_KEY が無いため終了")
+            sys.exit(1)
+        call_fn = call_claude
     now = datetime.datetime.now(JST)
     try:
-        run(args.data, args.watchlist, args.user, api_key, now)
+        run(args.data, args.watchlist, args.user, api_key, now, call_fn=call_fn)
     except urllib.error.URLError as e:
         log(f"Claude API呼び出しに失敗したため終了: {e}")
         sys.exit(1)
     except bai.InputAssemblyError as e:
         log(f"分析入力の組み立てに失敗したため終了: {e}")
+        sys.exit(1)
+    except RuntimeError as e:
+        log(f"分析生成に失敗したため終了: {e}")
         sys.exit(1)
 
 
