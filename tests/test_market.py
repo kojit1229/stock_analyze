@@ -131,14 +131,16 @@ class TestMainOutputs(unittest.TestCase):
             mdir = os.path.join(d, "market")
             self.assertTrue(os.path.exists(os.path.join(mdir, "2026-07-07.json")))
             self.assertTrue(os.path.exists(os.path.join(mdir, "2026-07-07.md")))
-            idx = json.load(open(os.path.join(mdir, "index.json")))
+            with open(os.path.join(mdir, "index.json"), encoding="utf-8") as f:
+                idx = json.load(f)
             self.assertEqual(idx["dates"], ["2026-07-07"])
             self.assertEqual(len(idx["series"]), 1)
             row = idx["series"][0]
             self.assertEqual(row[0], "2026-07-07")
             self.assertEqual(row[1], 2)  # up
             self.assertEqual(row[2], 2)  # down
-            snap = json.load(open(os.path.join(mdir, "2026-07-07.json")))
+            with open(os.path.join(mdir, "2026-07-07.json"), encoding="utf-8") as f:
+                snap = json.load(f)
             self.assertIn("comment", snap)
             self.assertEqual(snap["summary"]["total"], 4)
 
