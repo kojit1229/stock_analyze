@@ -36,6 +36,9 @@ jobs:
       - name: Market summary snapshot (市況概況の日次保存 JSON+MD)
         continue-on-error: true
         run: python scripts/market_summary.py --data frontend/data
+      - name: Generate scores (決算スコアリングv1・ルールベース)
+        continue-on-error: true
+        run: python scripts/generate_scores.py --data frontend/data
       - name: Generate price alerts (マイ銘柄の終値アラート)
         continue-on-error: true
         env:
