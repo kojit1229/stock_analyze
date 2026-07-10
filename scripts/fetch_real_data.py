@@ -272,6 +272,11 @@ def fetch_tdnet_day(ds, per_day_limit=3000):
         pub = str(t.get("pubdate", "") or "").strip()
         published_at = pub.replace(" ", "T") if pub else None
         pdf_url = t.get("document_url") or ""
+        # url_xbrl: 決算短信サマリーXBRL(zip)の直接URL。やのしんWebAPIは決算短信
+        # 系の開示のみこのフィールドを持つ(業績予想修正等では null)。document_url
+        # と同じ rd.php リダイレクタ形式のため direct_pdf_url() で剥がす
+        # (generate_alerts.py の xbrl_lookup がこのURLからzipを取得する)。
+        xbrl_url = direct_pdf_url(t.get("url_xbrl") or "")
         tid = str(t.get("id", "") or "")
         if not tid:
             tid = hashlib.md5(f"{code}|{published_at}|{title}".encode()).hexdigest()[:12]
@@ -280,6 +285,7 @@ def fetch_tdnet_day(ds, per_day_limit=3000):
             "code": code,
             "title": title,
             "pdf_url": pdf_url,
+            "xbrl_url": xbrl_url,
             "doc_type": doc_type,
             "published_at": published_at,
         })
