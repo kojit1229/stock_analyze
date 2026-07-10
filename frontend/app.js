@@ -309,7 +309,11 @@ function homePriorityHtml(d, upcoming, alertData, aiIdx) {
   if (aiNew.length) {
     sections.push(`<div>
       <div style="font-weight:700;font-size:13px;margin-bottom:4px">🧠 新着AI分析</div>
-      ${aiNew.map((it) => row(`#/ai-analysis/${encodeURIComponent(it.path)}`, `${h(it.code)} ${h(it.name)} — ${h(it.title)}`)).join("")}
+      ${aiNew.map((it) => {
+        const summaryLine = aiSummaryFirstLine(it);
+        return row(`#/ai-analysis/${encodeURIComponent(it.path)}`,
+          `${h(it.code)} ${h(it.name)} — ${h(it.title)}${summaryLine ? " — " + summaryLine : ""}`);
+      }).join("")}
     </div>`);
   }
   return `<div class="card" style="margin-bottom:16px">
@@ -1096,6 +1100,12 @@ async function loadAiAnalysisIndex() {
     _aiAnalysisIdxCache = { items: [] };
   }
   return _aiAnalysisIdxCache;
+}
+
+// P3-3: manifest(seen.json)のsummary(3行要約)の1行目をエスケープ済みで返す。
+// summaryが無い既存エントリでは空文字を返す(呼び出し側は空文字なら従来表示のまま=後方互換)。
+function aiSummaryFirstLine(it) {
+  return (it && Array.isArray(it.summary) && it.summary[0]) ? h(it.summary[0]) : "";
 }
 
 const ANALYSIS_KEY = "kessan_analysis_v1";
@@ -1980,13 +1990,17 @@ route("ai-analysis", async (app, rest) => {
     <div class="page-head"><h1>AI分析</h1><span class="sub">決算発表を検知しAIが自動生成した分析レポート(マイ銘柄のみ)</span></div>
     ${items.length ? `<div class="table-wrap"><table>
       <thead><tr><th>銘柄</th><th>開示</th><th>公表日時</th><th>生成日時</th></tr></thead>
-      <tbody>${items.map((it) => `
+      <tbody>${items.map((it) => {
+        const summaryLine = aiSummaryFirstLine(it);
+        return `
         <tr>
           <td class="code-cell">${h(it.code)} ${h(it.name)}</td>
-          <td><a class="link" href="#/ai-analysis/${encodeURIComponent(it.path)}">${h(it.title)}</a></td>
+          <td><a class="link" href="#/ai-analysis/${encodeURIComponent(it.path)}">${h(it.title)}</a>
+            ${summaryLine ? `<div style="color:var(--text-dim);font-size:12px;margin-top:2px">${summaryLine}</div>` : ""}</td>
           <td>${h(fmtDateTime(it.published_at))}</td>
           <td>${h(fmtDateTime(it.generated_at))}</td>
-        </tr>`).join("")}</tbody></table></div>`
+        </tr>`;
+      }).join("")}</tbody></table></div>`
       : '<div class="empty">まだAI分析レポートがありません。マイ銘柄の決算発表を検知すると自動生成されます。</div>'}`;
 });
 
