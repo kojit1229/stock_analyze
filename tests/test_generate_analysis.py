@@ -217,6 +217,81 @@ class TestRun(unittest.TestCase):
             self.assertEqual(gan.seen_ids_of(data_dir), set())
 
 
+class TestExtractSummary(unittest.TestCase):
+    """P3-3: 本文冒頭の `## 3行要約` 箇条書きを抽出する extract_summary() のテスト。"""
+
+    def test_extracts_three_bullets_after_heading(self):
+        text = (
+            "## 3行要約\n"
+            "- 増収増益で着地した\n"
+            "- 進捗率は前年並み\n"
+            "- 業績予想の修正は無し\n\n"
+            "## 1. 詳細\n本文...\n"
+        )
+        self.assertEqual(
+            gan.extract_summary(text),
+            ["増収増益で着地した", "進捗率は前年並み", "業績予想の修正は無し"])
+
+    def test_missing_heading_returns_empty_list(self):
+        self.assertEqual(gan.extract_summary("## 1. 詳細\n本文だけで要約見出しが無い\n"), [])
+
+    def test_heading_without_following_bullets_returns_empty_list(self):
+        text = "## 3行要約\n本文がいきなり続いていて箇条書きがない\n"
+        self.assertEqual(gan.extract_summary(text), [])
+
+    def test_asterisk_bullets_are_also_accepted(self):
+        text = "## 3行要約\n* 事実A\n* 事実B\n"
+        self.assertEqual(gan.extract_summary(text), ["事実A", "事実B"])
+
+    def test_blank_line_immediately_after_heading_is_skipped(self):
+        text = "## 3行要約\n\n- 事実A\n- 事実B\n"
+        self.assertEqual(gan.extract_summary(text), ["事実A", "事実B"])
+
+
+class TestSaveAnalysisSummary(unittest.TestCase):
+    """P3-3: save_analysis() が summary を抽出して返し、抽出失敗時は空配列+warnログ
+    (生成自体は成功扱い)になることを検証する。"""
+
+    MATERIAL = {
+        "disclosure": {"id": "K1", "title": "決算短信のお知らせ", "doc_type": "決算短信",
+                        "published_at": "2026-07-09T16:00:00"},
+        "sources": ["frontend/data/financials.json"],
+    }
+
+    def test_summary_extracted_and_saved_to_manifest_via_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = _setup_data_dir(tmp)
+            wl_path, user_path = _setup_config(tmp, watchlist_codes=["8125"])
+            body = "## 3行要約\n- 増収増益\n- 進捗率は前年並み\n- 修正無し\n\n## 1. 詳細\n本文\n"
+
+            saved = gan.run(data_dir, wl_path, user_path, "dummy-key", NOW,
+                             call_fn=lambda m, k: body, notify_fn=lambda item, now: True)
+            self.assertEqual(saved[0]["summary"], ["増収増益", "進捗率は前年並み", "修正無し"])
+
+            with open(os.path.join(data_dir, "analysis", "seen.json"), encoding="utf-8") as f:
+                manifest = json.load(f)
+            self.assertEqual(manifest["items"][0]["summary"], ["増収増益", "進捗率は前年並み", "修正無し"])
+
+    def test_extraction_failure_gives_empty_summary_but_still_succeeds(self):
+        """抽出失敗(見出しが無い等)は黙殺しない(warnログ)が、生成自体は失敗にしない。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = _setup_data_dir(tmp)
+            wl_path, user_path = _setup_config(tmp, watchlist_codes=["8125"])
+
+            saved = gan.run(data_dir, wl_path, user_path, "dummy-key", NOW,
+                             call_fn=lambda m, k: "見出しの無い本文", notify_fn=lambda item, now: True)
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved[0]["summary"], [])
+
+    def test_save_analysis_returns_filename_and_summary_tuple(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "frontend", "data")
+            body = "## 3行要約\n- 事実A\n- 事実B\n- 事実C\n\n本文\n"
+            filename, summary = gan.save_analysis(data_dir, "8125", "テスト8125", self.MATERIAL, body, NOW)
+            self.assertEqual(filename, "8125_K1.md")
+            self.assertEqual(summary, ["事実A", "事実B", "事実C"])
+
+
 class _FakeHTTPResponse:
     """urllib.request.urlopen の戻り値(with文で使うレスポンス)をモックする。"""
 
