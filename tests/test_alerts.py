@@ -210,6 +210,24 @@ class TestGenerate(unittest.TestCase):
         types = [a["type"] for a in out if a["type"].startswith("disclosure_")]
         self.assertEqual(types, ["disclosure_業績予想修正"])
 
+    def test_surprise_title_classification_has_basis_taitoru(self):
+        # F-2: 方向性(上方/下方/増配/減配)まで分類できた開示アラートには
+        # サプライズ一覧タブの根拠バッジ用に basis="タイトル" が付く
+        discs = [
+            {"code": "1301", "doc_type": "業績予想修正", "title": "通期業績予想の上方修正に関するお知らせ",
+             "published_at": "2026-07-07T15:00:00"},
+            # 方向不明な汎用種別には basis を付けない(根拠を明言できないため)
+            {"code": "7203", "doc_type": "自己株式取得", "title": "自己株式の取得に係る事項の決定",
+             "published_at": "2026-07-07T15:00:00"},
+        ]
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3},
+                                       {"code": "7203", "importance": 3}], None,
+                          "2026-07-07", disclosures=discs)
+        upward = next(a for a in out if a["type"] == "disclosure_業績予想上方修正")
+        self.assertEqual(upward["basis"], "タイトル")
+        generic = next(a for a in out if a["type"] == "disclosure_自己株式取得")
+        self.assertNotIn("basis", generic)
+
     def test_financial_surprise_turnaround_and_record_profit(self):
         financials = {"stocks": {"1301": {
             "a": [["2024-03-31", 100.0, -50.0, -60.0, -1.0],
@@ -223,6 +241,9 @@ class TestGenerate(unittest.TestCase):
         # 直近期(2026-03-31)は前期比黒字転換ではない(前期も黒字)が、過去最高益ではある
         self.assertIn("surprise_record_profit", types)
         self.assertNotIn("surprise_turnaround", types)
+        # F-2: xbrl_lookup未指定 (Yahoo由来financials.jsonのみ) では basis="財務"
+        record_profit = next(a for a in out if a["type"] == "surprise_record_profit")
+        self.assertEqual(record_profit["basis"], "財務")
 
     def test_financial_surprise_only_when_updated_today(self):
         financials = {"stocks": {"1301": {
@@ -270,8 +291,10 @@ class TestGenerate(unittest.TestCase):
                           "2026-07-07", financials=financials, xbrl_lookup=lookup)
         types = {a["type"] for a in out if a["type"].startswith("surprise_")}
         self.assertIn("surprise_record_profit", types)
-        detail = next(a["detail"] for a in out if a["type"] == "surprise_record_profit")
-        self.assertIn("999", detail)  # XBRL確定値が採用されている
+        record_profit = next(a for a in out if a["type"] == "surprise_record_profit")
+        self.assertIn("999", record_profit["detail"])  # XBRL確定値が採用されている
+        # F-2: XBRL確定値で上書きされた場合は basis="XBRL"
+        self.assertEqual(record_profit["basis"], "XBRL")
 
     def test_xbrl_parse_failure_falls_back_to_yahoo_and_logs(self):
         """不正なXBRL(パース不能)を返す xbrl_lookup を渡しても例外にならず、

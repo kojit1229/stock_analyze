@@ -843,6 +843,31 @@ async function disclosureDetail(app, id) {
 }
 
 // ---------------------------------------------------------------------------
+// F-2: サプライズ一覧タブ (上方/下方修正・増配/減配・黒字転換・最高益更新を横断一覧化)
+// ---------------------------------------------------------------------------
+route("surprises", async (app) => {
+  const alertData = await loadAlerts();
+  const items = (alertData.alerts || [])
+    .filter((a) => isSurpriseAlertType(a.type))
+    .sort((a, b) => ((a.date || "") < (b.date || "") ? 1 : (a.date || "") > (b.date || "") ? -1 : 0));
+  app.innerHTML = `
+    <div class="page-head"><h1>サプライズ</h1><span class="sub">上方/下方修正・増配/減配・黒字転換・最高益更新をマイ銘柄横断で一覧化</span></div>
+    ${items.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>日付</th><th>コード</th><th>銘柄名</th><th>重要度</th><th>アラート</th><th>詳細</th><th>根拠</th></tr></thead>
+      <tbody>${items.map((a) => `<tr>
+        <td>${fmtDate(a.date)}</td>
+        <td class="code-cell"><a class="link" href="#/analysis/${h(a.code)}">${h(a.code)}</a></td>
+        <td>${h(a.name || "")}</td>
+        <td><span class="star">${stars(a.importance)}</span></td>
+        <td>${alertIcon(a.type)} ${h(a.title || "")}</td>
+        <td class="num">${h(a.detail || "")}</td>
+        <td>${surpriseBasisBadge(a.basis)}</td></tr>`).join("")}
+      </tbody></table></div>`
+      : '<div class="empty">サプライズは検出されていません。マイ銘柄の業績予想修正・増減配・黒字転換・最高益更新を平日の引け後に自動チェックします。</div>'}
+    <div class="meta-line">根拠: XBRL=決算短信サマリーXBRLの確定値 / 財務=Yahoo由来financials.jsonの構造化数値 / タイトル=開示タイトルからの分類。保持期間は直近30日分です。</div>`;
+});
+
+// ---------------------------------------------------------------------------
 // 銘柄詳細画面
 // ---------------------------------------------------------------------------
 route("stock", async (app, rest) => {

@@ -233,8 +233,12 @@ def financial_surprises(financials, mystocks, today, xbrl_lookup=None):
         latest_op = fnum(latest[2]) if len(latest) > 2 else None
         prev_op = fnum(prev[2]) if len(prev) > 2 else None
         xbrl_op = xbrl_confirmed_operating_income(code, xbrl_lookup)
+        # basis: サプライズ一覧タブ(#/surprises)の根拠バッジ用。営業利益がXBRL確定値で
+        # 上書きされたか、Yahoo由来financials.jsonのままかを記録する。
+        basis = "財務"
         if xbrl_op is not None:
             latest_op = xbrl_op
+            basis = "XBRL"
         if latest_op is None:
             continue
         imp = m.get("importance") or 3
@@ -244,6 +248,7 @@ def financial_surprises(financials, mystocks, today, xbrl_lookup=None):
                 "type": "surprise_turnaround",
                 "title": "営業利益が黒字転換",
                 "detail": f"{latest[0]} 営業利益 {latest_op:,.0f}円 (前期 {prev_op:,.0f}円)",
+                "basis": basis,
             })
         history = [fnum(row[2]) for row in annual[:-1] if len(row) > 2]
         history = [v for v in history if v is not None]
@@ -253,6 +258,7 @@ def financial_surprises(financials, mystocks, today, xbrl_lookup=None):
                 "type": "surprise_record_profit",
                 "title": "営業利益が過去最高を更新",
                 "detail": f"{latest[0]} 営業利益 {latest_op:,.0f}円",
+                "basis": basis,
             })
     return alerts
 
@@ -350,12 +356,17 @@ def generate(prices, schedule, mystocks, settings, today, disclosures=None, reac
             for d in disc_by_code.get(code, []):
                 specific = classify_surprise_type(d["doc_type"], d.get("title"))
                 label = specific or d["doc_type"]
-                alerts.append({
+                alert = {
                     "date": today, "code": code, "importance": imp,
                     "type": "disclosure_" + label,
                     "title": f"サプライズ: {label}" if specific else f"開示: {label}",
                     "detail": (d.get("title") or "")[:70],
-                })
+                }
+                # basis: 上方/下方修正・増配/減配など方向性まで分類できた場合のみ、
+                # サプライズ一覧タブ(#/surprises)向けに開示タイトル判定である旨を記録する。
+                if specific:
+                    alert["basis"] = "タイトル"
+                alerts.append(alert)
             # 決算サプライズ (黒字転換・最高益) — XBRL/Yahoo由来の構造化数値のみで判定
             alerts.extend(financial_surprises(financials, [m], today, xbrl_lookup=xbrl_lookup))
         # 連続下落 / 連続上昇 (3日以上)
