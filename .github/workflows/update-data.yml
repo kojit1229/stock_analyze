@@ -37,10 +37,8 @@ jobs:
         continue-on-error: true
         run: python scripts/market_summary.py --data frontend/data
       - name: Generate scores (決算スコアリングv1・ルールベース)
-        continue-on-error: true
         run: python scripts/generate_scores.py --data frontend/data
       - name: Generate price alerts (マイ銘柄の終値アラート)
-        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python scripts/generate_alerts.py --data frontend/data --user config/user_data.json
