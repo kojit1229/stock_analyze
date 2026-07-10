@@ -971,6 +971,20 @@ async function loadAlerts() {
   return _alertCache;
 }
 
+let _scoreCache = null;
+async function loadScores() {
+  if (_scoreCache) return _scoreCache;
+  try {
+    const res = await fetch("data/scores.json", { cache: "no-cache" });
+    if (!res.ok) throw new Error(String(res.status));
+    const data = await res.json();
+    _scoreCache = (data && data.scores) ? data : { scores: {} };
+  } catch (e) {
+    _scoreCache = { scores: {} };
+  }
+  return _scoreCache;
+}
+
 const ANALYSIS_KEY = "kessan_analysis_v1";
 function loadAnalysisState() {
   try {
@@ -1675,8 +1689,8 @@ async function renderAnalysisBody(code) {
     body.innerHTML = `<div class="empty">エラー: ${h(e.message)}</div>`;
     return;
   }
-  const [findata, metaInfo, pricesData, reactions] = await Promise.all([
-    loadFinancials(), loadMetaInfo(), loadPrices(), loadReactions(),
+  const [findata, metaInfo, pricesData, reactions, scoresData] = await Promise.all([
+    loadFinancials(), loadMetaInfo(), loadPrices(), loadReactions(), loadScores(),
   ]);
   const finGot = Object.keys(findata.stocks || {}).filter((c) => {
     const v = findata.stocks[c];
@@ -1736,6 +1750,7 @@ async function renderAnalysisBody(code) {
     </div>` : `<div class="card" style="margin-bottom:14px"><div class="empty">この銘柄の財務数値(売上高・利益など)はまだ取得されていません。<br>
       全${finTotal ? finTotal.toLocaleString("en-US") : ""}銘柄をコード順に自動巡回中です(取得済み: ${finGot.toLocaleString("en-US")}銘柄・毎時拡大)。<br>
       取得され次第、ここに指標と推移チャートが表示されます。</div></div>`}
+    ${scoreHtml(scoresData.scores[code])}
     ${last ? analysisInsightHtml(stock, fin, pricesData.stocks[code]) : ""}
     ${last ? progressHtml(fin) : ""}
     ${financialHealthHtml(stock, fin)}
@@ -2511,6 +2526,32 @@ function progressHtml(fin) {
       <h2>⏱ 決算進捗 <span class="count">第${p.n}四半期累計 ÷ 前期通期 (概算)</span></h2>
       <div class="grid cols-3">${p.rows.map(cell).join("")}</div>
       <div class="meta-line">会社予想は取得していないため「前期通期に対する消化率」を前年同時点と比較しています。+3pt以上で「先行」、-3pt以下で「遅れ」。季節性 (上期偏重など) はこの比較で吸収されます。</div>
+    </div>`;
+}
+
+// ---- 決算スコアリングv1 (ルールベース・コンセンサス不使用。scores.json) ----
+function scoreHtml(entry) {
+  if (!entry) return "";
+  if (entry.insufficient_data || entry.score == null) {
+    return `<div class="card" style="margin-bottom:14px">
+      <h2>🧮 決算スコア <span class="count">v1・ルールベース</span></h2>
+      <div class="empty">財務データが不足しているため算出できません。</div>
+    </div>`;
+  }
+  const badge = (b) => {
+    const cls = b.signal === 1 ? "ok" : b.signal === -1 ? "unread" : "market";
+    const word = b.signal === 1 ? "◎" : b.signal === -1 ? "×" : (b.signal === 0 ? "△" : "-");
+    return `<div class="card stat" style="background:var(--bg-elev)">
+      <div class="label">${h(b.label)}</div>
+      <div class="value" style="font-size:18px"><span class="badge ${cls}">${word}</span></div>
+      <div class="meta-line" style="margin-top:2px">${h(b.note)}</div>
+    </div>`;
+  };
+  return `
+    <div class="card" style="margin-bottom:14px">
+      <h2>🧮 決算スコア <span class="count">${entry.score}点 / 100点・v1ルールベース</span></h2>
+      <div class="grid cols-4">${(entry.breakdown || []).map(badge).join("")}</div>
+      <div class="meta-line">増収増益・利益率改善・進捗率・業績予想修正の4項目から算出(コンセンサス比較は未使用)。算出不能な項目は「-」。</div>
     </div>`;
 }
 
