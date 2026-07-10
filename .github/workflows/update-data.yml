@@ -44,6 +44,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python scripts/generate_alerts.py --data frontend/data --user config/user_data.json
+      - name: Generate AI analysis (決算発表検知時のAI分析生成・保存。対象が無ければ即終了)
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/generate_analysis.py --data frontend/data
       - name: Commit and push if changed
         run: |
           git config user.name "github-actions[bot]"
