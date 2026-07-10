@@ -171,6 +171,99 @@ class TestGenerate(unittest.TestCase):
         self.assertIn("決算翌日 +6.3%", r.get("7203", ""))
         self.assertNotIn("6506", r)  # 急変動イベントは決算反応の対象外
 
+    def test_surprise_title_classification_upward_downward(self):
+        discs = [
+            {"code": "1301", "doc_type": "業績予想修正", "title": "通期業績予想の上方修正に関するお知らせ",
+             "published_at": "2026-07-07T15:00:00"},
+            {"code": "7203", "doc_type": "業績予想修正", "title": "業績予想の下方修正について",
+             "published_at": "2026-07-07T15:00:00"},
+        ]
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3},
+                                       {"code": "7203", "importance": 3}], None,
+                          "2026-07-07", disclosures=discs)
+        types = {a["code"]: a["type"] for a in out if a["type"].startswith("disclosure_業績予想")}
+        self.assertEqual(types["1301"], "disclosure_業績予想上方修正")
+        self.assertEqual(types["7203"], "disclosure_業績予想下方修正")
+
+    def test_surprise_title_classification_dividend(self):
+        discs = [
+            {"code": "1301", "doc_type": "配当予想修正", "title": "配当予想の修正(増配)に関するお知らせ",
+             "published_at": "2026-07-07T15:00:00"},
+        ]
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3}], None,
+                          "2026-07-07", disclosures=discs)
+        types = [a["type"] for a in out if a["type"].startswith("disclosure_配当")]
+        self.assertEqual(types, ["disclosure_配当増配"])
+
+    def test_surprise_title_classification_fallback_generic(self):
+        # 上方/下方/増配/減配のいずれのキーワードも無ければ従来どおり汎用種別のまま
+        discs = [
+            {"code": "1301", "doc_type": "業績予想修正", "title": "業績予想の修正に関するお知らせ",
+             "published_at": "2026-07-07T15:00:00"},
+        ]
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3}], None,
+                          "2026-07-07", disclosures=discs)
+        types = [a["type"] for a in out if a["type"].startswith("disclosure_")]
+        self.assertEqual(types, ["disclosure_業績予想修正"])
+
+    def test_financial_surprise_turnaround_and_record_profit(self):
+        financials = {"stocks": {"1301": {
+            "a": [["2024-03-31", 100.0, -50.0, -60.0, -1.0],
+                  ["2025-03-31", 110.0, 10.0, 5.0, 0.5],
+                  ["2026-03-31", 130.0, 200.0, 150.0, 15.0]],
+            "t": "2026-07-07",
+        }}}
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3}], None,
+                          "2026-07-07", financials=financials)
+        types = {a["type"] for a in out if a["type"].startswith("surprise_")}
+        # 直近期(2026-03-31)は前期比黒字転換ではない(前期も黒字)が、過去最高益ではある
+        self.assertIn("surprise_record_profit", types)
+        self.assertNotIn("surprise_turnaround", types)
+
+    def test_financial_surprise_only_when_updated_today(self):
+        financials = {"stocks": {"1301": {
+            "a": [["2025-03-31", 100.0, -10.0, -10.0, -1.0],
+                  ["2026-03-31", 130.0, 20.0, 15.0, 1.5]],
+            "t": "2026-07-06",  # 今日更新されていない
+        }}}
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3}], None,
+                          "2026-07-07", financials=financials)
+        self.assertEqual([a for a in out if a["type"].startswith("surprise_")], [])
+
+    def test_financial_surprise_turnaround_only(self):
+        financials = {"stocks": {"1301": {
+            "a": [["2024-03-31", 100.0, 50.0, 40.0, 3.0],
+                  ["2025-03-31", 90.0, -20.0, -25.0, -2.0],
+                  ["2026-03-31", 95.0, 5.0, 3.0, 0.3]],
+            "t": "2026-07-07",
+        }}}
+        out = ga.generate(PRICES, [], [{"code": "1301", "importance": 3}], None,
+                          "2026-07-07", financials=financials)
+        types = {a["type"] for a in out if a["type"].startswith("surprise_")}
+        self.assertIn("surprise_turnaround", types)
+        self.assertNotIn("surprise_record_profit", types)  # 過去(50.0)を超えていない
+
+    def test_surprise_alerts_idempotent_across_runs(self):
+        """同一開示・同一財務更新を複数回のパイプライン実行で処理しても
+        二重アラートにならないこと (main() の alert_key ベース dedupe を再現)。"""
+        discs = [{"code": "1301", "doc_type": "業績予想修正",
+                  "title": "通期業績予想の上方修正に関するお知らせ",
+                  "published_at": "2026-07-07T15:00:00"}]
+        financials = {"stocks": {"1301": {
+            "a": [["2025-03-31", 100.0, -10.0, -10.0, -1.0],
+                  ["2026-03-31", 130.0, 20.0, 15.0, 1.5]],
+            "t": "2026-07-07",
+        }}}
+        my = [{"code": "1301", "importance": 3}]
+        first_run = ga.generate(PRICES, [], my, None, "2026-07-07",
+                                disclosures=discs, financials=financials)
+        known = {ga.alert_key(a) for a in first_run}
+        self.assertTrue(known)  # 何かしらアラートが出ていることを前提とする
+        second_run = ga.generate(PRICES, [], my, None, "2026-07-07",
+                                 disclosures=discs, financials=financials)
+        new_only = [a for a in second_run if ga.alert_key(a) not in known]
+        self.assertEqual(new_only, [])
+
 
 if __name__ == "__main__":
     unittest.main()

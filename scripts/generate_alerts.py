@@ -19,6 +19,10 @@
 - volume     : 出来高急増 (3ヶ月平均のY倍以上)
 - earnings   : 決算発表の前日・当日
 - disclosure : 重要開示 (業績予想修正・配当予想修正・自己株式取得・訂正決算短信)
+  - 業績予想修正/配当予想修正は開示タイトルから上方・下方/増配・減配を判定できれば
+    より具体的な種別 (例: disclosure_業績予想上方修正) にする (決算サプライズ検出)。
+- surprise   : 決算サプライズ (frontend/data/financials.json の構造化数値のみ使用。
+    PDF本文はパースしない)。黒字転換・営業利益の最高益更新を検出する。
 - streak     : 3日以上の連続下落/連続上昇 (reactions.json の終値履歴から判定)
 - reaction   : 決算発表への株価反応 (反応日/翌営業日に±X%以上動いた)
 
@@ -34,6 +38,19 @@ import urllib.request
 JST = datetime.timezone(datetime.timedelta(hours=9))
 KEEP_DAYS = 30
 DISC_ALERT_TYPES = ("業績予想修正", "配当予想修正", "自己株式取得", "訂正決算短信")
+# 開示タイトルから方向性まで分類できるルール (doc_type -> [(キーワード群, 分類後ラベル)])
+# 「PDF regex禁止」の対象は決算短信PDF本文の数値抽出であり、TDnet開示タイトルの
+# 分類は fetch_real_data.py の DOC_TYPE_RULES と同じ既存パターン(タイトル文字列判定)。
+SURPRISE_TITLE_RULES = {
+    "業績予想修正": (
+        (("上方", "増額"), "業績予想上方修正"),
+        (("下方", "減額"), "業績予想下方修正"),
+    ),
+    "配当予想修正": (
+        (("増配",), "配当増配"),
+        (("減配",), "配当減配"),
+    ),
+}
 
 # 重要度ごとの既定値 (設定画面で未保存の場合に使う)
 DEFAULT_SETTINGS = {
@@ -128,7 +145,60 @@ def streak_of(tail, code, min_days=3):
     return (n, direction) if n >= min_days else (0, 0)
 
 
-def generate(prices, schedule, mystocks, settings, today, disclosures=None, reactions=None):
+def classify_surprise_type(doc_type, title):
+    """開示タイトルから方向性 (上方/下方修正・増配/減配) を分類する。分類不可なら None。"""
+    title = title or ""
+    for keywords, label in SURPRISE_TITLE_RULES.get(doc_type, ()):
+        if any(k in title for k in keywords):
+            return label
+    return None
+
+
+def financial_surprises(financials, mystocks, today):
+    """financials.json (Yahoo/XBRL由来の構造化決算数値。PDF本文は使わない) から
+    営業利益の黒字転換・最高益更新を検出する。
+
+    当日 (今回のパイプライン実行) にデータ更新があった銘柄 (t == today) の
+    最新年度のみを判定対象にする (古いデータで繰り返しアラートが出ないため)。
+    """
+    alerts = []
+    stocks_fin = (financials or {}).get("stocks") or {}
+    for m in mystocks:
+        code = m["code"]
+        entry = stocks_fin.get(code)
+        if not entry or entry.get("t") != today:
+            continue
+        annual = entry.get("a") or []
+        if len(annual) < 2:
+            continue
+        # [期末日, 売上高, 営業利益, 純利益, EPS]
+        latest, prev = annual[-1], annual[-2]
+        latest_op = fnum(latest[2]) if len(latest) > 2 else None
+        prev_op = fnum(prev[2]) if len(prev) > 2 else None
+        if latest_op is None:
+            continue
+        imp = m.get("importance") or 3
+        if prev_op is not None and latest_op > 0 and prev_op <= 0:
+            alerts.append({
+                "date": today, "code": code, "importance": imp,
+                "type": "surprise_turnaround",
+                "title": "営業利益が黒字転換",
+                "detail": f"{latest[0]} 営業利益 {latest_op:,.0f}円 (前期 {prev_op:,.0f}円)",
+            })
+        history = [fnum(row[2]) for row in annual[:-1] if len(row) > 2]
+        history = [v for v in history if v is not None]
+        if history and latest_op > max(history):
+            alerts.append({
+                "date": today, "code": code, "importance": imp,
+                "type": "surprise_record_profit",
+                "title": "営業利益が過去最高を更新",
+                "detail": f"{latest[0]} 営業利益 {latest_op:,.0f}円",
+            })
+    return alerts
+
+
+def generate(prices, schedule, mystocks, settings, today, disclosures=None, reactions=None,
+             financials=None):
     """アラート判定の純粋関数。alerts のリストを返す (dedupe は呼び出し側)。
 
     prices:      {"date": "YYYY-MM-DD", "stocks": {code: [close, chg%, hi52, lo52, vol, avgVol, ...]}}
@@ -136,6 +206,8 @@ def generate(prices, schedule, mystocks, settings, today, disclosures=None, reac
     mystocks:    [{"code","importance"}...]
     disclosures: [{"code","doc_type","title","published_at"}...] (本日公表分のみ判定)
     reactions:   {"tail": {...}, "events": [...]} (track_reactions.py の出力)
+    financials:  {"stocks": {code: {"a": [[期末日,売上高,営業利益,純利益,EPS]...], "t": "YYYY-MM-DD"}}}
+                 (frontend/data/financials.json。構造化数値のみ使用しPDFはパースしない)
     """
     alerts = []
     pstocks = (prices or {}).get("stocks") or {}
@@ -213,12 +285,16 @@ def generate(prices, schedule, mystocks, settings, today, disclosures=None, reac
         # 重要開示 (業績予想修正・配当予想修正・自己株式取得・訂正決算短信)
         if conf.get("disclosure"):
             for d in disc_by_code.get(code, []):
+                specific = classify_surprise_type(d["doc_type"], d.get("title"))
+                label = specific or d["doc_type"]
                 alerts.append({
                     "date": today, "code": code, "importance": imp,
-                    "type": "disclosure_" + d["doc_type"],
-                    "title": f"開示: {d['doc_type']}",
+                    "type": "disclosure_" + label,
+                    "title": f"サプライズ: {label}" if specific else f"開示: {label}",
                     "detail": (d.get("title") or "")[:70],
                 })
+            # 決算サプライズ (黒字転換・最高益) — XBRL/Yahoo由来の構造化数値のみで判定
+            alerts.extend(financial_surprises(financials, [m], today))
         # 連続下落 / 連続上昇 (3日以上)
         if conf.get("streak"):
             n, direction = streak_of(tail, code)
@@ -265,7 +341,8 @@ def create_issue(new_alerts, names, today):
     owner = repo.split("/")[0]
     icon = {"price_move": "📈", "wk52_high": "🚀", "wk52_low": "🔻",
             "volume": "📊", "earnings": "📅", "streak_down": "📉",
-            "streak_up": "📈", "reaction": "🎯"}
+            "streak_up": "📈", "reaction": "🎯",
+            "surprise_turnaround": "🌱", "surprise_record_profit": "🏆"}
 
     def icon_of(t):
         return "📢" if t.startswith("disclosure") else icon.get(t, "🔔")
@@ -325,6 +402,7 @@ def main():
     names = {s.get("code"): s.get("name", "") for s in stocks if isinstance(s, dict)}
     disclosures = load_json(os.path.join(args.data, "disclosures.json"), [])
     reactions = load_json(os.path.join(args.data, "reactions.json"), None)
+    financials = load_json(os.path.join(args.data, "financials.json"), None)
 
     user = load_json(args.user, None)
     if not user:
@@ -342,7 +420,7 @@ def main():
     known = {alert_key(a) for a in old_alerts}
 
     generated = generate(prices, schedule, mystocks, settings, today,
-                         disclosures=disclosures, reactions=reactions)
+                         disclosures=disclosures, reactions=reactions, financials=financials)
     new_alerts = [a for a in generated if alert_key(a) not in known]
     for a in new_alerts:
         a["name"] = names.get(a["code"], "")
