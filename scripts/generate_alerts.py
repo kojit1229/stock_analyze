@@ -331,6 +331,17 @@ def alert_key(a):
     return f"{a['date']}|{a['code']}|{a['type']}"
 
 
+def should_include_price_alerts(now, force):
+    """株価系アラート(price_move/wk52/volume/disclosure/surprise/streak/reaction)を
+    含めてよいかを判定する。場中(JST15時より前)の暫定値を避けるため、15時以降
+    または --force のときのみ True。
+
+    決算発表予定(前日・当日朝)の earnings 通知はこのゲートの対象外
+    (呼び出し側が prices=None で generate() を呼ぶことで分離する)。
+    """
+    return now.hour >= 15 or bool(force)
+
+
 def create_issue(new_alerts, names, today):
     """GitHub Issue を作成してオーナーにメンションする (通知メールが届く)。"""
     token = os.environ.get("GITHUB_TOKEN")
@@ -389,20 +400,11 @@ def main():
 
     now = datetime.datetime.now(JST)
     today = now.strftime("%Y-%m-%d")
-    if now.hour < 15 and not args.force:
-        log(f"JST {now.hour}時 (15時前) のためアラート生成をスキップ (場中の暫定値を避ける)")
-        return
+    after_hours = should_include_price_alerts(now, args.force)
 
-    prices = load_json(os.path.join(args.data, "prices.json"), None)
-    if not prices or not (prices.get("stocks") or {}):
-        log("prices.json が無いためスキップ")
-        return
     schedule = load_json(os.path.join(args.data, "schedule.json"), [])
     stocks = load_json(os.path.join(args.data, "stocks.json"), [])
     names = {s.get("code"): s.get("name", "") for s in stocks if isinstance(s, dict)}
-    disclosures = load_json(os.path.join(args.data, "disclosures.json"), [])
-    reactions = load_json(os.path.join(args.data, "reactions.json"), None)
-    financials = load_json(os.path.join(args.data, "financials.json"), None)
 
     user = load_json(args.user, None)
     if not user:
@@ -414,13 +416,29 @@ def main():
         return
     settings = settings or DEFAULT_SETTINGS
 
+    if after_hours:
+        prices = load_json(os.path.join(args.data, "prices.json"), None)
+        if not prices or not (prices.get("stocks") or {}):
+            log("prices.json が無いためスキップ")
+            return
+        disclosures = load_json(os.path.join(args.data, "disclosures.json"), [])
+        reactions = load_json(os.path.join(args.data, "reactions.json"), None)
+        financials = load_json(os.path.join(args.data, "financials.json"), None)
+        generated = generate(prices, schedule, mystocks, settings, today,
+                             disclosures=disclosures, reactions=reactions, financials=financials)
+    else:
+        log(f"JST {now.hour}時 (15時前) のため株価系アラートはスキップし、"
+            "決算発表予定(前日・当日朝)の通知のみ生成します (場中の暫定値を避ける)")
+        # prices/disclosures/reactions/financials を渡さない (None) ことで、
+        # generate() 内の株価系・開示系判定は自然にスキップされ、schedule 由来の
+        # earnings 判定のみが実行される。
+        generated = generate(None, schedule, mystocks, settings, today)
+
     out_path = os.path.join(args.data, "alerts.json")
     existing = load_json(out_path, {})
     old_alerts = existing.get("alerts") or []
     known = {alert_key(a) for a in old_alerts}
 
-    generated = generate(prices, schedule, mystocks, settings, today,
-                         disclosures=disclosures, reactions=reactions, financials=financials)
     new_alerts = [a for a in generated if alert_key(a) not in known]
     for a in new_alerts:
         a["name"] = names.get(a["code"], "")

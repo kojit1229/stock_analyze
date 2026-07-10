@@ -1,4 +1,5 @@
 """scripts/generate_alerts.py のアラート判定ロジックのテスト。"""
+import datetime
 import importlib.util
 import os
 import sys
@@ -242,6 +243,47 @@ class TestGenerate(unittest.TestCase):
         types = {a["type"] for a in out if a["type"].startswith("surprise_")}
         self.assertIn("surprise_turnaround", types)
         self.assertNotIn("surprise_record_profit", types)  # 過去(50.0)を超えていない
+
+    def test_should_include_price_alerts_gate(self):
+        # 15時より前は株価系アラート不可 (force無し)
+        morning = datetime.datetime(2026, 7, 7, 9, 5, tzinfo=ga.JST)
+        self.assertFalse(ga.should_include_price_alerts(morning, False))
+        # 15時ちょうど以降は可
+        after = datetime.datetime(2026, 7, 7, 15, 35, tzinfo=ga.JST)
+        self.assertTrue(ga.should_include_price_alerts(after, False))
+        # --force なら午前でも可
+        self.assertTrue(ga.should_include_price_alerts(morning, True))
+
+    def test_morning_run_generates_earnings_only(self):
+        """午前 (prices=None) の呼び出しでも決算(earnings)通知は生成され、
+        株価系・開示系・サプライズ系アラートは出ないこと。"""
+        my = [{"code": "1301", "importance": 5}, {"code": "7203", "importance": 5}]
+        settings = {"levels": {"5": all_on()}}
+        out = ga.generate(None, SCHEDULE, my, settings, "2026-07-07")
+        types = {a["type"] for a in out}
+        self.assertEqual(types, {"earnings"})
+        earn = {a["code"]: a["title"] for a in out}
+        self.assertIn("本日", earn["1301"])
+        self.assertIn("明日", earn["7203"])
+
+    def test_earnings_alert_idempotent_morning_then_afterhours(self):
+        """当日朝の実行で生成された earnings 通知が、同日の場後(15時以降)の
+        再実行で二重に登録されないこと (main() の alert_key ベース dedupe を再現)。"""
+        my = [{"code": "1301", "importance": 5}, {"code": "7203", "importance": 5}]
+        settings = {"levels": {"5": all_on()}}
+
+        # 朝の実行 (prices=None)
+        morning_alerts = ga.generate(None, SCHEDULE, my, settings, "2026-07-07")
+        self.assertTrue(morning_alerts)
+        known = {ga.alert_key(a) for a in morning_alerts}
+
+        # 場後 (15時以降) の実行: 同じ earnings に加え株価系アラートも評価される
+        afterhours_alerts = ga.generate(PRICES, SCHEDULE, my, settings, "2026-07-07")
+        new_only = [a for a in afterhours_alerts if ga.alert_key(a) not in known]
+        # 朝と同じ earnings は再通知されない
+        self.assertFalse(any(a["type"] == "earnings" for a in new_only))
+        # 朝には無かった株価系アラートは新規として残る
+        self.assertTrue(any(a["type"] == "price_move" for a in new_only))
 
     def test_surprise_alerts_idempotent_across_runs(self):
         """同一開示・同一財務更新を複数回のパイプライン実行で処理しても
