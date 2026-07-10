@@ -83,13 +83,42 @@ def _is_non_consolidated_context(context_id):
     return "NonConsolidated" in (context_id or "")
 
 
+def _context_periods(root):
+    """<xbrli:context> 要素を読み、contextRef -> 期間終了日 (duration の
+    endDate、instant の instant) のマップを作る。同一タグに複数期間
+    (当期・前期など) の fact が併記されている場合に、どれが当期かを
+    contextRef の命名規則に頼らず実際の期間定義から判定するために使う。
+    期間情報が取れないコンテキストはマップに含めない。"""
+    periods = {}
+    for ctx in root.iter():
+        if _local(ctx.tag) != "context":
+            continue
+        cid = ctx.get("id")
+        if not cid:
+            continue
+        end = None
+        for child in ctx.iter():
+            local = _local(child.tag)
+            if local in ("endDate", "instant"):
+                text = (child.text or "").strip()
+                if text:
+                    end = text
+        if end:
+            periods[cid] = end
+    return periods
+
+
 def _pick_value(root, tag_candidates):
-    """指定タグ群から連結優先・単体劣後で値を選ぶ。
+    """指定タグ群から連結優先・単体劣後、かつ同じ連結区分内では期間終了日が
+    最も新しい (=当期) factを選ぶ。
     戻り値: (value: float|None, consolidated: bool)
     連結値が1つも見つからなければ単体値にフォールバックする。
+    期間定義が読めないコンテキストは最劣後として扱い、他に手がかりが
+    無い場合のみ文書順で最初のfactを採用する(従来の挙動を維持)。
     """
-    cons_val = None
-    noncons_val = None
+    periods = _context_periods(root)
+    cons_best = None  # (period_end, value)
+    noncons_best = None
     for el in root.iter():
         if _local(el.tag) not in tag_candidates:
             continue
@@ -97,16 +126,18 @@ def _pick_value(root, tag_candidates):
         if val is None:
             continue
         ctx = el.get("contextRef") or ""
+        period_end = periods.get(ctx) or ""
+        entry = (period_end, val)
         if _is_non_consolidated_context(ctx):
-            if noncons_val is None:
-                noncons_val = val
+            if noncons_best is None or period_end > noncons_best[0]:
+                noncons_best = entry
         else:
-            if cons_val is None:
-                cons_val = val
-    if cons_val is not None:
-        return cons_val, True
-    if noncons_val is not None:
-        return noncons_val, False
+            if cons_best is None or period_end > cons_best[0]:
+                cons_best = entry
+    if cons_best is not None:
+        return cons_best[1], True
+    if noncons_best is not None:
+        return noncons_best[1], False
     return None, True
 
 

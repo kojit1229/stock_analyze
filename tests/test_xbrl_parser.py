@@ -53,6 +53,16 @@ class TestXbrlParser(unittest.TestCase):
         self.assertEqual(result["operating_income"], -1000.0)  # ▲1,000 も負数変換される
         self.assertFalse(result["consolidated"])
 
+    def test_prior_year_fact_appearing_first_is_not_mistakenly_picked(self):
+        """同一タグに前期・当期の両方のfactがあり、前期の値が文書順で先に
+        出現しても、contextRefの期間定義(endDate)を見て当期の値を採用する
+        こと(C-4: 文書順で最初のfactを採用してしまう既知バグの再発防止)。"""
+        xbrl = _read_fixture("xbrl_summary_prior_year_first.xml")
+        result = xp.parse_summary(xbrl)
+        self.assertEqual(result["net_sales"], 900000000.0)  # 当期(900M)。前期(700M)ではない
+        self.assertEqual(result["operating_income"], 80000.0)  # 当期(80,000)。前期(50,000)ではない
+        self.assertTrue(result["consolidated"])
+
     def test_invalid_xbrl_raises(self):
         xbrl = _read_fixture("xbrl_invalid.xml")
         with self.assertRaises(xp.XbrlParseError):

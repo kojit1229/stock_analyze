@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  合成フィクスチャ: 同一タグ (NetSales) に前期(PriorYear)と当期(CurrentYear)の
+  factが両方あり、かつ「前期の値が先(文書順で先頭)に出現する」ケース。
+  _pick_value() が文書順で最初のfactを採用する既知バグ(C-4)の再現用。
+  修正後は contextRef の期間定義 (endDate) を見て当期(2026-03-31期末)の値を
+  採用しなければならない。
+-->
+<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"
+            xmlns:tse-ed-t="http://www.xbrl.tdnet.info/jp/br/tdnet/t/ed/2013-08-31">
+  <xbrli:context id="PriorYearDuration_ConsolidatedMember">
+    <xbrli:entity><xbrli:identifier scheme="http://disclosure.edinet-fsa.go.jp">E00002</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2024-04-01</xbrli:startDate><xbrli:endDate>2025-03-31</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="CurrentYearDuration_ConsolidatedMember">
+    <xbrli:entity><xbrli:identifier scheme="http://disclosure.edinet-fsa.go.jp">E00002</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2025-04-01</xbrli:startDate><xbrli:endDate>2026-03-31</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+
+  <!-- 前期の売上高が文書順で先に出現する (旧実装だとこちらが誤って採用される) -->
+  <tse-ed-t:NetSales contextRef="PriorYearDuration_ConsolidatedMember" unitRef="JPY" decimals="-3">700,000,000</tse-ed-t:NetSales>
+  <!-- 当期の売上高 (本来採用すべき値) -->
+  <tse-ed-t:NetSales contextRef="CurrentYearDuration_ConsolidatedMember" unitRef="JPY" decimals="-3">900,000,000</tse-ed-t:NetSales>
+
+  <!-- 営業利益も同様に前期→当期の順で出現する -->
+  <tse-ed-t:OperatingIncome contextRef="PriorYearDuration_ConsolidatedMember" unitRef="JPY" decimals="-3">50,000</tse-ed-t:OperatingIncome>
+  <tse-ed-t:OperatingIncome contextRef="CurrentYearDuration_ConsolidatedMember" unitRef="JPY" decimals="-3">80,000</tse-ed-t:OperatingIncome>
+</xbrli:xbrl>
