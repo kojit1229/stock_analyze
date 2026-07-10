@@ -2737,12 +2737,19 @@ function scoreHtml(entry) {
       <div class="empty">財務データが不足しているため算出できません。</div>
     </div>`;
   }
+  // F-4: シグナルの寄与方向を +/-/対象外 で明示し(◎×△のような記号だけに頼らない)、
+  // 「なぜこの点か」がバッジと1行説明(note、scripts/generate_scores.py由来)だけで読めるようにする。
+  const dirInfo = (signal) => {
+    if (signal === 1) return { cls: "ok", word: "+ プラス寄与" };
+    if (signal === -1) return { cls: "unread", word: "− マイナス寄与" };
+    if (signal === 0) return { cls: "market", word: "± 中立" };
+    return { cls: "pending", word: "対象外" };
+  };
   const badge = (b) => {
-    const cls = b.signal === 1 ? "ok" : b.signal === -1 ? "unread" : "market";
-    const word = b.signal === 1 ? "◎" : b.signal === -1 ? "×" : (b.signal === 0 ? "△" : "-");
+    const di = dirInfo(b.signal);
     return `<div class="card stat" style="background:var(--bg-elev)">
       <div class="label">${h(b.label)}</div>
-      <div class="value" style="font-size:18px"><span class="badge ${cls}">${word}</span></div>
+      <div class="value" style="font-size:15px"><span class="badge ${di.cls}">${di.word}</span></div>
       <div class="meta-line" style="margin-top:2px">${h(b.note)}</div>
     </div>`;
   };
@@ -2750,7 +2757,7 @@ function scoreHtml(entry) {
     <div class="card" style="margin-bottom:14px">
       <h2>🧮 決算スコア <span class="count">${entry.score}点 / 100点・v1ルールベース</span></h2>
       <div class="grid cols-4">${(entry.breakdown || []).map(badge).join("")}</div>
-      <div class="meta-line">増収増益・利益率改善・進捗率・業績予想修正の4項目から算出(コンセンサス比較は未使用)。算出不能な項目は「-」。</div>
+      <div class="meta-line">増収増益・利益率改善・進捗率・業績予想修正の4項目それぞれの寄与方向(+/−/対象外)から算出(50点を基準に平均へ加減。コンセンサス比較は未使用)。「対象外」はデータ不足で算出できない項目。</div>
     </div>`;
 }
 
