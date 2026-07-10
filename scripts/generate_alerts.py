@@ -47,6 +47,11 @@ _xbrl_spec = importlib.util.spec_from_file_location(
 xbrl_parser = importlib.util.module_from_spec(_xbrl_spec)
 _xbrl_spec.loader.exec_module(xbrl_parser)
 
+_xbrl_fetch_spec = importlib.util.spec_from_file_location(
+    "xbrl_fetch", os.path.join(os.path.dirname(__file__), "xbrl_fetch.py"))
+xbrl_fetch = importlib.util.module_from_spec(_xbrl_fetch_spec)
+_xbrl_fetch_spec.loader.exec_module(xbrl_fetch)
+
 JST = datetime.timezone(datetime.timedelta(hours=9))
 KEEP_DAYS = 30
 DISC_ALERT_TYPES = ("業績予想修正", "配当予想修正", "自己株式取得", "訂正決算短信")
@@ -482,12 +487,20 @@ def main():
         disclosures = load_json(os.path.join(args.data, "disclosures.json"), [])
         reactions = load_json(os.path.join(args.data, "reactions.json"), None)
         financials = load_json(os.path.join(args.data, "financials.json"), None)
-        # xbrl_lookup: 決算短信サマリーXBRLをTDnetから取得してキャッシュする経路は
-        # 未実装 (別チケット。実ネットワークアクセスを伴うため本チケットの範囲外)。
-        # 未配線の間は financial_surprises() が Yahoo由来の financials.json のみで
-        # 判定する (xbrl_lookup=None は完全な後方互換)。
+        # xbrl_lookup: 当日の決算短信/訂正決算短信(disclosures.jsonのxbrl_url、
+        # W2-1b)からサマリーXBRL zipを取得・キャッシュするlookupを配線する
+        # (W2-1c: xbrl_fetch.py)。lookup構築自体が失敗しても株価系・開示系の
+        # アラート生成は継続する(Yahoo由来値のみでの判定に自動的にフォールバック
+        # するため。xbrl_confirmed_operating_income が取得・解析失敗を個別にログする)。
+        try:
+            xbrl_lookup = xbrl_fetch.make_lookup(
+                disclosures, today, cache_dir=os.path.join(args.data, "xbrl_cache"))
+        except Exception as e:  # noqa: BLE001 — lookup構築自体の失敗は握りつぶさずログにする
+            log(f"XBRL lookupの構築に失敗 ({type(e).__name__}: {e}) — Yahoo由来値のみで判定します")
+            xbrl_lookup = None
         generated = generate(prices, schedule, mystocks, settings, today,
-                             disclosures=disclosures, reactions=reactions, financials=financials)
+                             disclosures=disclosures, reactions=reactions, financials=financials,
+                             xbrl_lookup=xbrl_lookup)
     else:
         log(f"JST {now.hour}時 (15時前) のため株価系アラートはスキップし、"
             "決算発表予定(前日・当日朝)の通知のみ生成します (場中の暫定値を避ける)")

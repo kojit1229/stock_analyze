@@ -1,10 +1,12 @@
 """scripts/generate_alerts.py のアラート判定ロジックのテスト。"""
 import datetime
 import importlib.util
+import json
 import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 _spec = importlib.util.spec_from_file_location(
     "generate_alerts",
@@ -408,6 +410,65 @@ class TestGenerate(unittest.TestCase):
                                  disclosures=discs, financials=financials)
         new_only = [a for a in second_run if ga.alert_key(a) not in known]
         self.assertEqual(new_only, [])
+
+
+class TestMainXbrlWiring(unittest.TestCase):
+    """main() が xbrl_fetch.make_lookup() で構築した xbrl_lookup を generate() に
+    実際に配線していること (W2-1d: 本番配線)。xbrl_fetch 自体はモックし、実
+    ネットワークアクセスはしない。"""
+
+    def test_xbrl_lookup_from_disclosures_overrides_yahoo_value_in_alerts_json(self):
+        today = datetime.datetime.now(ga.JST).strftime("%Y-%m-%d")
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "frontend", "data")
+            os.makedirs(data_dir)
+            with open(os.path.join(data_dir, "schedule.json"), "w", encoding="utf-8") as f:
+                json.dump([], f)
+            with open(os.path.join(data_dir, "stocks.json"), "w", encoding="utf-8") as f:
+                json.dump([{"code": "1301", "name": "極洋"}], f)
+            with open(os.path.join(data_dir, "prices.json"), "w", encoding="utf-8") as f:
+                json.dump({"date": today, "stocks": {"1301": [4000.0, 0.5, 5000.0, 3000.0, 50_000, 60_000]}}, f)
+            with open(os.path.join(data_dir, "disclosures.json"), "w", encoding="utf-8") as f:
+                json.dump([{"key": "K1", "code": "1301", "doc_type": "決算短信",
+                            "title": "決算短信のお知らせ", "xbrl_url": "https://example/1.zip",
+                            "published_at": f"{today}T15:00:00"}], f)
+            with open(os.path.join(data_dir, "financials.json"), "w", encoding="utf-8") as f:
+                json.dump({"stocks": {"1301": {
+                    "a": [["2024-03-31", 100.0, 50.0, 40.0, 3.0],
+                          ["2025-03-31", 90.0, -20.0, -25.0, -2.0],
+                          ["2026-03-31", 95.0, 5.0, 3.0, 0.3]],
+                    "t": today}}}, f)
+            config_dir = os.path.join(tmp, "config")
+            os.makedirs(config_dir)
+            user_path = os.path.join(config_dir, "user_data.json")
+            with open(user_path, "w", encoding="utf-8") as f:
+                json.dump({"data": {"kessan_local_v1": json.dumps(
+                    {"mystocks": [{"code": "1301", "importance": 3}]})}}, f)
+
+            # xbrl_fetch.make_lookup が返す lookup を差し替え、渡された disclosures/today
+            # が本物であること、かつ generate() が実際にその lookup を使うことを検証する。
+            captured = {}
+
+            def fake_make_lookup(disclosures, d_today, cache_dir=None):
+                captured["disclosures"] = disclosures
+                captured["today"] = d_today
+                return lambda code: TestGenerate.XBRL_HIGH_OP_INCOME if code == "1301" else None
+
+            with mock.patch.object(ga.xbrl_fetch, "make_lookup", side_effect=fake_make_lookup), \
+                 mock.patch.object(sys, "argv",
+                                    ["generate_alerts.py", "--data", data_dir, "--user", user_path,
+                                     "--force"]):
+                ga.main()
+
+            self.assertEqual(captured["today"], today)
+            self.assertTrue(any(d.get("code") == "1301" for d in captured["disclosures"]))
+
+            with open(os.path.join(data_dir, "alerts.json"), encoding="utf-8") as f:
+                alerts = json.load(f)["alerts"]
+            record_profit = [a for a in alerts if a["type"] == "surprise_record_profit"]
+            self.assertTrue(record_profit)
+            # XBRL確定値 (999) がYahoo由来値 (5.0) より優先されていることを確認する
+            self.assertIn("999", record_profit[0]["detail"])
 
 
 class TestLoadJsonFailLoud(unittest.TestCase):
