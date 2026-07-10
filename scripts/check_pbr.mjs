@@ -77,7 +77,10 @@ const finFixture = JSON.parse(fs.readFileSync(path.join(FE, "data", "financials.
 const equityOf = (code) => {
   const b = (finFixture.stocks[code] || {}).b || [];
   const lb = b[b.length - 1];
-  return lb && lb[2] != null && lb[4] != null ? lb[2] - lb[4] : null;
+  if (!lb) return null;
+  // 株主資本 (b[5]) を第一候補にし、欠損時のみ 総資産-負債合計 にフォールバックする
+  if (lb[5] != null) return lb[5];
+  return lb[2] != null && lb[4] != null ? lb[2] - lb[4] : null;
 };
 function expectedPbr(code) {
   const s = stocksFixture.find((x) => x.code === code);

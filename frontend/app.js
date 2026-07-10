@@ -1966,7 +1966,7 @@ async function buildScreenerRows() {
     const cap = s.market_cap || null;
     const ni = la && la[3], rev = la && la[1];
     const nc = netCashInfo(lb, cap);
-    const eq = lb && lb[2] != null && lb[4] != null ? lb[2] - lb[4] : null;
+    const eq = lb && lb[5] != null ? lb[5] : (lb && lb[2] != null && lb[4] != null ? lb[2] - lb[4] : null);
     const yrs = Math.min(3, a.length - 1);
     const p = prices.stocks[s.code];
     rows.push({
@@ -2494,7 +2494,7 @@ function analysisInsightHtml(stock, fin, price) {
   // ROE・ROA (BS) と利益の質 (営業CF vs 純利益)
   const b = fin.b || [], c = fin.c || [];
   const lastB = b[b.length - 1], lastC = c[c.length - 1];
-  const eq = lastB && lastB[2] != null && lastB[4] != null ? lastB[2] - lastB[4] : null;
+  const eq = lastB && lastB[5] != null ? lastB[5] : (lastB && lastB[2] != null && lastB[4] != null ? lastB[2] - lastB[4] : null);
   const pbr = cap && eq > 0 ? cap / eq : null;
   const roe = ni != null && eq > 0 ? (ni / eq) * 100 : null;
   const roa = ni != null && lastB && lastB[2] > 0 ? (ni / lastB[2]) * 100 : null;
@@ -2892,7 +2892,7 @@ async function renderCompareBody() {
     <tr><td class="metric-name">PER (概算)</td>${cell((s) => { const l = lastA(s); const ni = l && l[3]; return s.market_cap && ni > 0 ? (s.market_cap / ni).toFixed(1) + "倍" : "-"; })}</tr>
     <tr><td class="metric-name">PBR (概算)</td>${cell((s) => {
       const b = lastB(s);
-      const eq = b && b[2] != null && b[4] != null ? b[2] - b[4] : null;
+      const eq = b && b[5] != null ? b[5] : (b && b[2] != null && b[4] != null ? b[2] - b[4] : null);
       return s.market_cap && eq > 0 ? (s.market_cap / eq).toFixed(2) + "倍" : "-";
     })}</tr>
     <tr><td class="metric-name">PSR (概算)</td>${cell((s) => { const l = lastA(s); const rev = l && l[1]; return s.market_cap && rev > 0 ? (s.market_cap / rev).toFixed(2) + "倍" : "-"; })}</tr>
@@ -2905,12 +2905,13 @@ async function renderCompareBody() {
     })}</tr>
     <tr><td class="metric-name">自己資本比率</td>${cell((s) => {
       const b = lastB(s);
-      if (!b || b[2] == null || b[4] == null || b[2] <= 0) return "-";
-      return (((b[2] - b[4]) / b[2]) * 100).toFixed(1) + "%";
+      const eq = b && b[5] != null ? b[5] : (b && b[2] != null && b[4] != null ? b[2] - b[4] : null);
+      if (!b || b[2] == null || b[2] <= 0 || eq == null) return "-";
+      return ((eq / b[2]) * 100).toFixed(1) + "%";
     })}</tr>
     <tr><td class="metric-name">ROE</td>${cell((s) => {
       const l = lastA(s), b = lastB(s);
-      const eq = b && b[2] != null && b[4] != null ? b[2] - b[4] : null;
+      const eq = b && b[5] != null ? b[5] : (b && b[2] != null && b[4] != null ? b[2] - b[4] : null);
       return l && l[3] != null && eq > 0 ? ((l[3] / eq) * 100).toFixed(1) + "%" : "-";
     })}</tr>
     <tr><td class="metric-name">配当利回り</td>${cell((s) =>
