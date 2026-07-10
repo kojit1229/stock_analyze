@@ -1973,6 +1973,7 @@ async function buildScreenerRows() {
       code: s.code, name: s.name, market: s.market || "", sector: s.sector || "",
       cap,
       per: cap && ni > 0 ? cap / ni : null,
+      pbr: cap && eq > 0 ? cap / eq : null,
       psr: cap && rev > 0 ? cap / rev : null,
       nc: nc && nc.ratio != null ? nc.ratio : null,
       eqR: lb && lb[2] > 0 && eq != null ? (eq / lb[2]) * 100 : null,
@@ -2081,6 +2082,7 @@ async function renderScreenerResult() {
         <th class="no-sort">コード</th><th class="no-sort">銘柄名</th><th class="no-sort">市場</th>
         <th data-sort="cap">時価総額${arrow("cap")}</th>
         <th data-sort="per">PER${arrow("per")}</th>
+        <th data-sort="pbr">PBR${arrow("pbr")}</th>
         <th data-sort="psr">PSR${arrow("psr")}</th>
         <th data-sort="nc" title="ネットキャッシュ比率 (清原式)">NC比率${arrow("nc")}</th>
         <th data-sort="eqR">自己資本${arrow("eqR")}</th>
@@ -2095,13 +2097,14 @@ async function renderScreenerResult() {
         <td><span class="badge market">${h(r.market)}</span></td>
         <td class="num">${r.cap != null ? fmtMoney(r.cap) : "-"}</td>
         <td class="num">${r.per != null ? r.per.toFixed(1) + "倍" : "-"}</td>
+        <td class="num">${r.pbr != null ? r.pbr.toFixed(2) + "倍" : "-"}</td>
         <td class="num">${r.psr != null ? r.psr.toFixed(2) + "倍" : "-"}</td>
         ${pctTd(r.nc, 50)}${pctTd(r.eqR)}${pctTd(r.roe, 12)}${pctTd(r.cagr, 15)}
         <td class="num">${r.div != null ? r.div.toFixed(2) + "%" : "-"}</td>
         ${chgTd(r.chg)}
       </tr>`).join("")}</tbody>
     </table></div>
-    <div class="meta-line" style="margin-top:8px">PER・PSR・ROE・NC比率は直近通期実績と最新時価総額からの概算。財務データ (BS) 未取得の銘柄は該当指標が「-」となり、指標フィルタ指定時は除外されます。銘柄コードから銘柄分析へ移動できます。</div>`}`;
+    <div class="meta-line" style="margin-top:8px">PER・PBR・PSR・ROE・NC比率は直近通期実績と最新時価総額からの概算。財務データ (BS) 未取得の銘柄は該当指標が「-」となり、指標フィルタ指定時は除外されます。銘柄コードから銘柄分析へ移動できます。</div>`}`;
   box.querySelectorAll("th[data-sort]").forEach((th) => {
     th.onclick = () => {
       const col = th.dataset.sort;
@@ -2492,6 +2495,7 @@ function analysisInsightHtml(stock, fin, price) {
   const b = fin.b || [], c = fin.c || [];
   const lastB = b[b.length - 1], lastC = c[c.length - 1];
   const eq = lastB && lastB[2] != null && lastB[4] != null ? lastB[2] - lastB[4] : null;
+  const pbr = cap && eq > 0 ? cap / eq : null;
   const roe = ni != null && eq > 0 ? (ni / eq) * 100 : null;
   const roa = ni != null && lastB && lastB[2] > 0 ? (ni / lastB[2]) * 100 : null;
   const ocf = lastC && lastC[1];
@@ -2514,6 +2518,7 @@ function analysisInsightHtml(stock, fin, price) {
     </div>
     <div class="grid cols-5" style="margin-bottom:14px">
       ${kv("PER (概算)", per == null ? "-" : per.toFixed(1) + "倍")}
+      ${kv("PBR (概算)", pbr == null ? "-" : pbr.toFixed(2) + "倍")}
       ${kv("PSR (概算)", psr == null ? "-" : psr.toFixed(2) + "倍")}
       ${kv("純利益率", nim == null ? "-" : nim.toFixed(1) + "%")}
       ${kv(`売上CAGR (${yrs}年)`, pct(revCagr))}
@@ -2885,6 +2890,11 @@ async function renderCompareBody() {
     <tr><td class="metric-name">純利益</td>${cell((s) => { const l = lastA(s); return fmtMoney(l && l[3]); })}</tr>
     <tr><td class="metric-name">EPS</td>${cell((s) => { const l = lastA(s); return l && l[4] != null ? l[4].toFixed(1) + "円" : "-"; })}</tr>
     <tr><td class="metric-name">PER (概算)</td>${cell((s) => { const l = lastA(s); const ni = l && l[3]; return s.market_cap && ni > 0 ? (s.market_cap / ni).toFixed(1) + "倍" : "-"; })}</tr>
+    <tr><td class="metric-name">PBR (概算)</td>${cell((s) => {
+      const b = lastB(s);
+      const eq = b && b[2] != null && b[4] != null ? b[2] - b[4] : null;
+      return s.market_cap && eq > 0 ? (s.market_cap / eq).toFixed(2) + "倍" : "-";
+    })}</tr>
     <tr><td class="metric-name">PSR (概算)</td>${cell((s) => { const l = lastA(s); const rev = l && l[1]; return s.market_cap && rev > 0 ? (s.market_cap / rev).toFixed(2) + "倍" : "-"; })}</tr>
     <tr><td class="metric-name">ネットキャッシュ比率 (清原式)</td>${cell((s) => {
       const nc = netCashInfo(lastB(s), s.market_cap);

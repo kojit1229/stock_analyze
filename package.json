@@ -6,6 +6,7 @@
   "scripts": {
     "check:api": "node scripts/check_local_api.mjs",
     "check:ui": "node scripts/smoke_ui.mjs",
+    "check:pbr": "node scripts/check_pbr.mjs",
     "gate": "bash scripts/harness/gate.sh",
     "fix": "bash scripts/harness/fix_loop.sh"
   },
