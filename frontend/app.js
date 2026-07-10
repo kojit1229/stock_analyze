@@ -775,6 +775,9 @@ async function disclosureDetail(app, id) {
   // リポジトリに恒久保存されたPDFがあれば最優先で使う (同一オリジンのため
   // 埋め込み表示が確実に動き、TDnetの掲載期間後も閲覧できる)
   const localPdf = findArchivedPdf(await loadPdfIndex(), d.code, d.published_at);
+  // F-3: この開示のAI分析が存在すれば(seen.jsonで判定)リンクを出す
+  const aiIdxForDisc = await loadAiAnalysisIndex();
+  const aiMatch = (aiIdxForDisc.items || []).find((it) => String(it.disclosure_id) === String(d.id));
   const downloadLink = !hasPdf ? ""
     : api.local
       ? `<a class="btn small ghost" href="${h(pdfUrl)}" ${isExternal ? 'target="_blank" rel="noopener"' : `download="${h(d.pdf_path || d.code + ".pdf")}"`}>⬇ ダウンロード</a>`
@@ -807,7 +810,8 @@ async function disclosureDetail(app, id) {
          <iframe class="pdf-frame" src="${h(pdfUrl)}" title="PDF"></iframe>`;
   app.innerHTML = `
     <a class="back-link" href="#/disclosures">← 決算短信一覧へ戻る</a>
-    <div class="page-head"><h1>${h(d.title)}</h1></div>
+    <div class="page-head"><h1>${h(d.title)}</h1>
+      ${aiMatch ? `<a class="link" href="#/ai-analysis/${encodeURIComponent(aiMatch.path)}" style="margin-left:auto;font-size:13px">🧠 AI分析あり →</a>` : ""}</div>
     <div class="grid split-21">
       <div class="card">
         ${viewer}
@@ -1856,9 +1860,11 @@ async function renderAnalysisBody(code) {
     body.innerHTML = `<div class="empty">エラー: ${h(e.message)}</div>`;
     return;
   }
-  const [findata, metaInfo, pricesData, reactions, scoresData] = await Promise.all([
-    loadFinancials(), loadMetaInfo(), loadPrices(), loadReactions(), loadScores(),
+  const [findata, metaInfo, pricesData, reactions, scoresData, aiIdx] = await Promise.all([
+    loadFinancials(), loadMetaInfo(), loadPrices(), loadReactions(), loadScores(), loadAiAnalysisIndex(),
   ]);
+  // F-3: この銘柄のAI分析が存在すれば(seen.jsonで判定)最新のものへのリンクを出す
+  const aiMatch = (aiIdx.items || []).find((it) => it.code === code);
   const finGot = Object.keys(findata.stocks || {}).filter((c) => {
     const v = findata.stocks[c];
     return v && ((v.a && v.a.length) || (v.q && v.q.length));
@@ -1902,6 +1908,7 @@ async function renderAnalysisBody(code) {
       <span class="badge market">${h(stock.market || "")}</span>
       <span class="badge market">${h(stock.sector || "")}</span>
       <span class="sub">時価総額 ${h(stock.market_cap_label || "-")}</span>
+      ${aiMatch ? `<a class="link" href="#/ai-analysis/${encodeURIComponent(aiMatch.path)}" style="font-size:12px">🧠 AI分析あり →</a>` : ""}
       <a class="link" href="#/stock/${h(stock.code)}" style="margin-left:auto;font-size:12px">銘柄詳細 →</a>
     </div>
     ${last ? `<div class="grid cols-4" style="margin-bottom:14px">
