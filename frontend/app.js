@@ -103,17 +103,30 @@ function todayISO() {
 }
 
 function fmtDate(d) {
+  // iOS Safari 対策: new Date(文字列) は使わず成分分解でパースする
   if (!d) return "-";
-  const dt = new Date(d.length <= 10 ? d + "T00:00:00" : d);
+  const m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return d;
+  const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   if (isNaN(dt)) return d;
   const w = ["日", "月", "火", "水", "木", "金", "土"][dt.getDay()];
   return `${dt.getMonth() + 1}/${dt.getDate()}(${w})`;
 }
 function fmtDateTime(d) {
+  // iOS Safari 対策: new Date(文字列) は使わず成分分解でパースする
   if (!d) return "-";
-  const dt = new Date(d);
+  const s = String(d);
+  const dtm = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (dtm) {
+    const dt = new Date(Number(dtm[1]), Number(dtm[2]) - 1, Number(dtm[3]), Number(dtm[4]), Number(dtm[5]));
+    if (isNaN(dt)) return d;
+    return `${dt.getFullYear()}/${dt.getMonth() + 1}/${dt.getDate()} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+  }
+  const dOnly = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!dOnly) return d;
+  const dt = new Date(Number(dOnly[1]), Number(dOnly[2]) - 1, Number(dOnly[3]));
   if (isNaN(dt)) return d;
-  return `${dt.getFullYear()}/${dt.getMonth() + 1}/${dt.getDate()} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+  return `${dt.getFullYear()}/${dt.getMonth() + 1}/${dt.getDate()}`;
 }
 function stars(n) {
   n = Math.max(0, Math.min(5, n || 0));
@@ -1693,6 +1706,47 @@ route("analysis", async (app, rest) => {
   if (code) await renderAnalysisBody(code);
 });
 
+// 決算数値の推移(年次/四半期チップ+チャート+テーブル)は analysisView.mode の
+// 切替のたびに再描画するが、同じ銘柄分析画面には未保存の分析コメント入力欄
+// (textarea) が同居する。iOS Safari 対策として、この領域だけを差分更新し、
+// 画面全体の innerHTML 全置換で入力中の textarea を巻き込まないようにする。
+function analysisPerfAreaHtml(fin) {
+  const rows = analysisView.mode === "q" ? (fin.q || []) : (fin.a || []);
+  const labels = rows.map((r) => periodLabel(r[0]));
+  const val = (i) => rows.map((r) => (r[i] == null ? null : r[i]));
+  const rev = val(1), op = val(2), ni = val(3), eps = val(4);
+  const opm = rows.map((r) => (r[1] && r[2] != null ? (r[2] / r[1]) * 100 : null));
+  return `
+    <h2>📊 決算数値の推移
+      <span style="margin-left:auto;display:inline-flex;gap:6px">
+        <span class="chip ${analysisView.mode === "a" ? "active" : ""}" id="an_mode_a">年次</span>
+        <span class="chip ${analysisView.mode === "q" ? "active" : ""}" id="an_mode_q">四半期</span>
+      </span></h2>
+    <div class="charts-grid">
+      ${chartSVG({ title: "売上高", labels, series: [{ name: "売上高", color: CHART_COLORS[0], values: rev }] })}
+      ${chartSVG({ title: "営業利益・純利益", labels, series: [
+        { name: "営業利益", color: CHART_COLORS[1], values: op },
+        { name: "純利益", color: CHART_COLORS[2], values: ni }] })}
+      ${chartSVG({ title: "営業利益率", labels, unit: "pct", series: [{ name: "営業利益率", color: CHART_COLORS[4], values: opm, type: "line" }] })}
+      ${chartSVG({ title: "EPS", labels, unit: "yen", series: [{ name: "EPS(円)", color: CHART_COLORS[3], values: eps, type: "line" }] })}
+    </div>
+    ${performanceTableHtml(rows, analysisView.mode)}
+    <div class="meta-line">出典: Yahoo Finance (年次は直近${(fin.a || []).length}期 / 四半期は取得できる範囲)。単位: 円。PER・PSRは時価総額と直近通期実績からの概算。</div>`;
+}
+
+function bindAnalysisPerfAreaEvents(fin) {
+  const aEl = el("an_mode_a"), qEl = el("an_mode_q");
+  if (aEl) aEl.onclick = () => { analysisView.mode = "a"; refreshAnalysisPerfArea(fin); };
+  if (qEl) qEl.onclick = () => { analysisView.mode = "q"; refreshAnalysisPerfArea(fin); };
+}
+
+function refreshAnalysisPerfArea(fin) {
+  const area = el("an_perf_area");
+  if (!area) return;
+  area.innerHTML = analysisPerfAreaHtml(fin);
+  bindAnalysisPerfAreaEvents(fin);
+}
+
 async function renderAnalysisBody(code) {
   const body = el("an_body");
   if (!body) return;
@@ -1712,11 +1766,6 @@ async function renderAnalysisBody(code) {
   }).length;
   const finTotal = (metaInfo.counts && metaInfo.counts.stocks) || null;
   const fin = findata.stocks[code] || { a: [], q: [] };
-  const rows = analysisView.mode === "q" ? (fin.q || []) : (fin.a || []);
-  const labels = rows.map((r) => periodLabel(r[0]));
-  const val = (i) => rows.map((r) => (r[i] == null ? null : r[i]));
-  const rev = val(1), op = val(2), ni = val(3), eps = val(4);
-  const opm = rows.map((r) => (r[1] && r[2] != null ? (r[2] / r[1]) * 100 : null));
 
   // 直近期のサマリ (年次ベース)
   const a = fin.a || [];
@@ -1769,22 +1818,8 @@ async function renderAnalysisBody(code) {
     ${last ? progressHtml(fin) : ""}
     ${financialHealthHtml(stock, fin)}
     ${reactionHtml(code, reactions)}
-    <div class="card" style="margin-bottom:14px">
-      <h2>📊 決算数値の推移
-        <span style="margin-left:auto;display:inline-flex;gap:6px">
-          <span class="chip ${analysisView.mode === "a" ? "active" : ""}" id="an_mode_a">年次</span>
-          <span class="chip ${analysisView.mode === "q" ? "active" : ""}" id="an_mode_q">四半期</span>
-        </span></h2>
-      <div class="charts-grid">
-        ${chartSVG({ title: "売上高", labels, series: [{ name: "売上高", color: CHART_COLORS[0], values: rev }] })}
-        ${chartSVG({ title: "営業利益・純利益", labels, series: [
-          { name: "営業利益", color: CHART_COLORS[1], values: op },
-          { name: "純利益", color: CHART_COLORS[2], values: ni }] })}
-        ${chartSVG({ title: "営業利益率", labels, unit: "pct", series: [{ name: "営業利益率", color: CHART_COLORS[4], values: opm, type: "line" }] })}
-        ${chartSVG({ title: "EPS", labels, unit: "yen", series: [{ name: "EPS(円)", color: CHART_COLORS[3], values: eps, type: "line" }] })}
-      </div>
-      ${performanceTableHtml(rows, analysisView.mode)}
-      <div class="meta-line">出典: Yahoo Finance (年次は直近${(fin.a || []).length}期 / 四半期は取得できる範囲)。単位: 円。PER・PSRは時価総額と直近通期実績からの概算。</div>
+    <div class="card" style="margin-bottom:14px" id="an_perf_area">
+      ${analysisPerfAreaHtml(fin)}
     </div>
     <div class="grid split-32">
       <div class="card">
@@ -1806,8 +1841,7 @@ async function renderAnalysisBody(code) {
       </div>
     </div>`;
 
-  el("an_mode_a").onclick = () => { analysisView.mode = "a"; renderAnalysisBody(code); };
-  el("an_mode_q").onclick = () => { analysisView.mode = "q"; renderAnalysisBody(code); };
+  bindAnalysisPerfAreaEvents(fin);
   el("an_comment_save").onclick = () => {
     analysisState.comments[code] = el("an_comment").value;
     saveAnalysisState();
