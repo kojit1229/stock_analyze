@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  合成フィクスチャ: 決算短信サマリーXBRL (最小構成)。
+  実TDnetの実XBRLサンプルがリポジトリに無いため、パーサの検証用に作成した。
+
+  検証したい2点:
+  1. 連結値が "CurrentYearDuration_ConsolidatedMember" のように "Member" を
+     含むコンテキストで報告されているケースでも、これを一律除外せず正しく
+     連結値として採用できること(単体側の別の値に落ちてしまう既知バグの回避)。
+  2. 営業利益が「△」付きの負数表記のとき、正しく負数に変換されること。
+-->
+<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"
+            xmlns:tse-ed-t="http://www.xbrl.tdnet.info/jp/br/tdnet/t/ed/2013-08-31">
+  <xbrli:context id="CurrentYearDuration_ConsolidatedMember">
+    <xbrli:entity><xbrli:identifier scheme="http://disclosure.edinet-fsa.go.jp">E00000</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2025-04-01</xbrli:startDate><xbrli:endDate>2026-03-31</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="CurrentYearDuration_NonConsolidatedMember">
+    <xbrli:entity><xbrli:identifier scheme="http://disclosure.edinet-fsa.go.jp">E00000</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2025-04-01</xbrli:startDate><xbrli:endDate>2026-03-31</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="CurrentYearDuration">
+    <xbrli:entity><xbrli:identifier scheme="http://disclosure.edinet-fsa.go.jp">E00000</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2025-04-01</xbrli:startDate><xbrli:endDate>2026-03-31</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+
+  <!-- 連結の売上高 (Memberコンテキストだが連結値。除外してはいけない) -->
+  <tse-ed-t:NetSales contextRef="CurrentYearDuration_ConsolidatedMember" unitRef="JPY" decimals="-3">1,234,567,890</tse-ed-t:NetSales>
+  <!-- 単体の売上高 (連結が存在するのでこちらは無視されるべき) -->
+  <tse-ed-t:NetSales contextRef="CurrentYearDuration_NonConsolidatedMember" unitRef="JPY" decimals="-3">999,999,999</tse-ed-t:NetSales>
+
+  <!-- 営業利益 (連結・赤字 = △表記) -->
+  <tse-ed-t:OperatingIncome contextRef="CurrentYearDuration" unitRef="JPY" decimals="-3">△12,345</tse-ed-t:OperatingIncome>
+
+  <!-- 業績予想の修正有無 -->
+  <tse-ed-t:RevisionOfForecastedConsolidatedFinancialInformation contextRef="CurrentYearDuration">true</tse-ed-t:RevisionOfForecastedConsolidatedFinancialInformation>
+</xbrli:xbrl>

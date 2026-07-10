@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 合成フィクスチャ: 不正な (閉じタグの無い) XBRL。XbrlParseError の送出を検証する。 -->
+<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance">
+  <tse-ed-t:NetSales contextRef="CurrentYearDuration">1,000
+</xbrli:xbrl>

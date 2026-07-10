@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  合成フィクスチャ: 連結コンテキストが存在せず、単体(非連結)の値しか
+  報告されていないケース。単体劣後(連結が無いときだけ単体にフォール
+  バックする)の挙動を検証する。
+-->
+<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"
+            xmlns:tse-ed-t="http://www.xbrl.tdnet.info/jp/br/tdnet/t/ed/2013-08-31">
+  <xbrli:context id="CurrentYearDuration_NonConsolidatedMember">
+    <xbrli:entity><xbrli:identifier scheme="http://disclosure.edinet-fsa.go.jp">E00001</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2025-04-01</xbrli:startDate><xbrli:endDate>2026-03-31</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+
+  <tse-ed-t:NetSales contextRef="CurrentYearDuration_NonConsolidatedMember" unitRef="JPY" decimals="-3">500,000,000</tse-ed-t:NetSales>
+  <tse-ed-t:OperatingIncome contextRef="CurrentYearDuration_NonConsolidatedMember" unitRef="JPY" decimals="-3">▲1,000</tse-ed-t:OperatingIncome>
+</xbrli:xbrl>

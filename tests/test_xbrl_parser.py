@@ -1,0 +1,77 @@
+"""scripts/xbrl_parser.py (決算短信サマリーXBRLパーサ) のユニットテスト。
+
+実XBRLサンプルはこのリポジトリに無いため、tests/fixtures/ に置いた最小の
+合成XBRLフィクスチャを使う。検証観点は T-3 の設計原則に対応する:
+  - 連結優先・単体劣後のコンテキスト選択 ("Member" を含むことを理由に
+    一律除外しない)
+  - △/▲ 負数表記の変換
+  - 不正な XBRL での例外送出
+"""
+import importlib.util
+import os
+import unittest
+
+_HERE = os.path.dirname(__file__)
+_spec = importlib.util.spec_from_file_location(
+    "xbrl_parser", os.path.join(_HERE, "..", "scripts", "xbrl_parser.py"))
+xp = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(xp)
+
+
+def _read_fixture(name):
+    with open(os.path.join(_HERE, "fixtures", name), "rb") as f:
+        return f.read()
+
+
+class TestXbrlParser(unittest.TestCase):
+    def test_consolidated_value_with_member_context_is_not_excluded(self):
+        """'ConsolidatedMember' のように contextRef に 'Member' を含んでいても
+        連結値として正しく採用され、単体値 (NonConsolidatedMember) に
+        フォールバックしないこと (設計原則2の既知バグ回避)。"""
+        xbrl = _read_fixture("xbrl_summary_consolidated_member.xml")
+        result = xp.parse_summary(xbrl)
+        self.assertEqual(result["net_sales"], 1234567890.0)
+        self.assertTrue(result["consolidated"])
+
+    def test_negative_value_with_geta_mark_is_converted(self):
+        """△ 付きの営業利益が負数に変換されること。"""
+        xbrl = _read_fixture("xbrl_summary_consolidated_member.xml")
+        result = xp.parse_summary(xbrl)
+        self.assertEqual(result["operating_income"], -12345.0)
+
+    def test_revision_flag_detected(self):
+        xbrl = _read_fixture("xbrl_summary_consolidated_member.xml")
+        result = xp.parse_summary(xbrl)
+        self.assertIs(result["forecast_revised"], True)
+
+    def test_nonconsolidated_fallback_when_no_consolidated_context(self):
+        """連結コンテキストが1つも無ければ単体値にフォールバックし、
+        consolidated=False を返すこと (単体劣後)。"""
+        xbrl = _read_fixture("xbrl_summary_nonconsolidated_only.xml")
+        result = xp.parse_summary(xbrl)
+        self.assertEqual(result["net_sales"], 500000000.0)
+        self.assertEqual(result["operating_income"], -1000.0)  # ▲1,000 も負数変換される
+        self.assertFalse(result["consolidated"])
+
+    def test_invalid_xbrl_raises(self):
+        xbrl = _read_fixture("xbrl_invalid.xml")
+        with self.assertRaises(xp.XbrlParseError):
+            xp.parse_summary(xbrl)
+
+    def test_empty_input_raises(self):
+        with self.assertRaises(xp.XbrlParseError):
+            xp.parse_summary(b"")
+        with self.assertRaises(xp.XbrlParseError):
+            xp.parse_summary(None)
+
+    def test_to_number_handles_plain_and_comma(self):
+        self.assertEqual(xp._to_number("1,234"), 1234.0)
+        self.assertEqual(xp._to_number("△1,234"), -1234.0)
+        self.assertEqual(xp._to_number("▲500"), -500.0)
+        self.assertEqual(xp._to_number(""), None)
+        self.assertEqual(xp._to_number(None), None)
+        self.assertEqual(xp._to_number("N/A"), None)
+
+
+if __name__ == "__main__":
+    unittest.main()
