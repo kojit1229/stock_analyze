@@ -41,14 +41,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python scripts/generate_alerts.py --data frontend/data --user config/user_data.json
-      - name: Probe yanoshin CORS headers (診断用)
-        continue-on-error: true
-        run: |
-          echo "--- response headers ---"
-          curl -sI --max-time 30 "https://webapi.yanoshin.jp/webapi/tdnet/list/7203.json?limit=1" | head -25 || true
-          echo "--- jsonp probe ---"
-          curl -s --max-time 30 "https://webapi.yanoshin.jp/webapi/tdnet/list/7203.json?limit=1&callback=cbtest" | head -c 200 || true
-          echo
       - name: Commit and push if changed
         run: |
           git config user.name "github-actions[bot]"
