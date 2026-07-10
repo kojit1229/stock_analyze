@@ -1,9 +1,12 @@
 """scripts/generate_analysis.py のテスト。Claude API は呼ばず call_fn を差し替えてモックする。"""
+import contextlib
 import datetime
 import importlib.util
+import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -119,8 +122,27 @@ class TestRun(unittest.TestCase):
             self.assertEqual(gan.seen_ids_of(data_dir), set())
 
 
+class _FakeHTTPResponse:
+    """urllib.request.urlopen の戻り値(with文で使うレスポンス)をモックする。"""
+
+    def __init__(self, payload):
+        self._data = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._data
+
+
 class TestCallClaudeCli(unittest.TestCase):
     """claude-cli バックエンド (ローカルタスクスケジューラ用)。subprocess.run をモックする。"""
+
+    def setUp(self):
+        gan.reset_cli_cost_total()
 
     MATERIAL = {
         "code": "8125",
@@ -176,6 +198,80 @@ class TestCallClaudeCli(unittest.TestCase):
         with mock.patch("subprocess.run", side_effect=OSError("not found")):
             with self.assertRaises(RuntimeError):
                 gan.call_claude_cli(self.MATERIAL)
+
+    def test_accumulates_total_cost_usd_across_calls(self):
+        """欠陥修正: total_cost_usd を破棄せず _CLI_COST_TOTAL に累積する。"""
+        raw1 = json.dumps({"is_error": False, "result": "a", "total_cost_usd": 0.1})
+        raw2 = json.dumps({"is_error": False, "result": "b", "total_cost_usd": 0.25})
+        with mock.patch("subprocess.run", side_effect=[self._run_result(0, raw1), self._run_result(0, raw2)]):
+            gan.call_claude_cli(self.MATERIAL)
+            gan.call_claude_cli(self.MATERIAL)
+        self.assertAlmostEqual(gan.get_cli_cost_total(), 0.35)
+
+    def test_missing_cost_field_defaults_to_zero_without_raising(self):
+        raw = json.dumps({"is_error": False, "result": "ok"})  # total_cost_usd なし
+        with mock.patch("subprocess.run", return_value=self._run_result(0, raw)):
+            gan.call_claude_cli(self.MATERIAL)
+        self.assertEqual(gan.get_cli_cost_total(), 0.0)
+
+    def test_non_numeric_cost_field_defaults_to_zero(self):
+        raw = json.dumps({"is_error": False, "result": "ok", "total_cost_usd": "N/A"})
+        with mock.patch("subprocess.run", return_value=self._run_result(0, raw)):
+            gan.call_claude_cli(self.MATERIAL)
+        self.assertEqual(gan.get_cli_cost_total(), 0.0)
+
+
+class TestMainCostLine(unittest.TestCase):
+    """main()がバックエンドごとにTOTAL_COST_USD行をstdoutへ出力することを検証する
+    (claude-cliのコストがusage.log記録から欠落していた欠陥の再発防止)。"""
+
+    def _argv(self, data_dir, wl_path, user_path, backend):
+        return ["generate_analysis.py", "--data", data_dir, "--watchlist", wl_path,
+                "--user", user_path, "--backend", backend]
+
+    def _cost_lines(self, output):
+        return [l for l in output.splitlines() if l.startswith("TOTAL_COST_USD=")]
+
+    def test_claude_cli_backend_prints_accumulated_cost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = _setup_data_dir(tmp)
+            wl_path, user_path = _setup_config(tmp, watchlist_codes=["8125"])
+            raw = json.dumps({"is_error": False, "result": "分析結果テキスト", "total_cost_usd": 0.1543})
+            fake_proc = subprocess.CompletedProcess(args=["claude"], returncode=0, stdout=raw, stderr="")
+            buf = io.StringIO()
+            with mock.patch("subprocess.run", return_value=fake_proc), \
+                 mock.patch.object(sys, "argv", self._argv(data_dir, wl_path, user_path, "claude-cli")), \
+                 contextlib.redirect_stdout(buf):
+                gan.main()
+            self.assertEqual(self._cost_lines(buf.getvalue()), ["TOTAL_COST_USD=0.1543"])
+
+    def test_api_backend_prints_zero_cost_in_same_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = _setup_data_dir(tmp)
+            wl_path, user_path = _setup_config(tmp, watchlist_codes=["8125"])
+            fake_resp = _FakeHTTPResponse({"content": [{"type": "text", "text": "分析結果テキスト"}]})
+            buf = io.StringIO()
+            with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "dummy"}), \
+                 mock.patch("urllib.request.urlopen", return_value=fake_resp), \
+                 mock.patch.object(sys, "argv", self._argv(data_dir, wl_path, user_path, "api")), \
+                 contextlib.redirect_stdout(buf):
+                gan.main()
+            self.assertEqual(self._cost_lines(buf.getvalue()), ["TOTAL_COST_USD=0.0000"])
+
+    def test_claude_cli_failure_still_prints_cost_before_exit(self):
+        """途中でエラー終了しても、それまでに発生したコストは失わずに出力する。"""
+        raw = json.dumps({"is_error": True, "result": "boom", "total_cost_usd": 0.05})
+        fake_proc = subprocess.CompletedProcess(args=["claude"], returncode=0, stdout=raw, stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = _setup_data_dir(tmp)
+            wl_path, user_path = _setup_config(tmp, watchlist_codes=["8125"])
+            buf = io.StringIO()
+            with mock.patch("subprocess.run", return_value=fake_proc), \
+                 mock.patch.object(sys, "argv", self._argv(data_dir, wl_path, user_path, "claude-cli")), \
+                 contextlib.redirect_stdout(buf):
+                with self.assertRaises(SystemExit):
+                    gan.main()
+            self.assertEqual(self._cost_lines(buf.getvalue()), ["TOTAL_COST_USD=0.0500"])
 
 
 class TestCreateIssue(unittest.TestCase):

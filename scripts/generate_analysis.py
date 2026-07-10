@@ -118,12 +118,31 @@ def call_claude(material, api_key):
     return text
 
 
+# claude-cliバックエンドの累積コスト(USD)。main()実行ごとに reset_cli_cost_total() でリセットする。
+# call_claude_cli の戻り値は run() の call_fn 契約(テキストのみ返す)を変えないための側路。
+_CLI_COST_TOTAL = 0.0
+
+
+def reset_cli_cost_total():
+    """claude-cliバックエンドの累積コストを0に戻す。main()の各実行の先頭、およびテストで使う。"""
+    global _CLI_COST_TOTAL
+    _CLI_COST_TOTAL = 0.0
+
+
+def get_cli_cost_total():
+    """claude-cliバックエンドの累積コスト(USD)を返す。"""
+    return _CLI_COST_TOTAL
+
+
 def call_claude_cli(material, api_key=None):
     """ローカルの claude CLI (`claude -p`) をヘッドレス実行して分析テキストを得る。
     ANTHROPIC_API_KEY は不要 (CLIのサブスクリプション認証を使う)。api_key引数は
     call_claude とシグネチャを揃えるためだけに存在し、未使用。
     loop/collect-invest.sh の claude 呼び出しパターン(--output-format json,
-    stdinでプロンプト投入)を踏襲する。"""
+    stdinでプロンプト投入)を踏襲する。
+    応答の total_cost_usd を _CLI_COST_TOTAL へ累積する(NEVER 8 予算ガードの精度確保のため。
+    黙殺しない: 数値でないレスポンスはwarnログを出したうえで0として扱う)。"""
+    global _CLI_COST_TOTAL
     prompt = build_prompt(material)
     claude_bin = os.environ.get("CLAUDE_BIN", "claude")
     cmd = [claude_bin, "-p", "--model", MODEL, "--output-format", "json",
@@ -141,6 +160,13 @@ def call_claude_cli(material, api_key=None):
         resp = json.loads(proc.stdout)
     except ValueError as e:
         raise RuntimeError(f"claude CLIの出力をJSONとして解析できません: {e}") from e
+    # is_error(エラー応答)でもCLI呼び出し自体のコストは発生しているため、
+    # エラー判定より先に加算する(黙殺しない。NEVER 8 予算ガードの精度確保)。
+    cost = resp.get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        _CLI_COST_TOTAL += cost
+    else:
+        log(f"claude CLI応答にtotal_cost_usdが無い/数値でないため0として扱います: {cost!r}")
     if resp.get("is_error"):
         raise RuntimeError(f"claude CLIがエラーを返しました: {resp.get('result')}")
     text = (resp.get("result") or "").strip()
@@ -251,6 +277,7 @@ def main():
                           "claude-cli=ローカルclaude CLI (サブスクリプション認証、ローカルバッチ用)")
     args = ap.parse_args()
     if args.backend == "claude-cli":
+        reset_cli_cost_total()
         call_fn, api_key = call_claude_cli, None
     else:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -270,6 +297,12 @@ def main():
     except RuntimeError as e:
         log(f"分析生成に失敗したため終了: {e}")
         sys.exit(1)
+    finally:
+        # NEVER 8 予算ガードの精度確保のため成功/失敗によらずコストを機械可読な1行で出力する
+        # (analyze-kessan.sh がこの行をパースして log-cost.sh 経由で台帳に記録する)。
+        # apiバックエンドはコストをこのプロセスで把握しないため0扱い(同一形式で出力)。
+        cost = get_cli_cost_total() if args.backend == "claude-cli" else 0.0
+        print(f"TOTAL_COST_USD={cost:.4f}", flush=True)
 
 
 if __name__ == "__main__":
