@@ -112,6 +112,21 @@ class TestScoreStock(unittest.TestCase):
         for b in result["breakdown"]:
             self.assertIsNone(b["signal"])
 
+    def test_revision_available_but_financials_missing_stays_insufficient(self):
+        """業績予想修正シグナルは取得できる(0/±1)が、財務3シグナル(増収増益・利益率改善・進捗率)が
+        全てNoneの銘柄は score=None, insufficient_data=True のまま(修正シグナル単独では点数化しない、フェイルラウド)。"""
+        entry = {"a": [], "q": []}
+        discs = [{"code": "1301", "doc_type": "業績予想修正", "title": "上方修正のお知らせ",
+                  "published_at": "2026-07-01T15:00:00"}]
+        result = gs.score_stock(entry, discs, disclosures_available=True)
+        self.assertIsNone(result["score"])
+        self.assertTrue(result["insufficient_data"])
+        signals = {b["key"]: b["signal"] for b in result["breakdown"]}
+        self.assertEqual(signals["revision"], 1)  # 取得可能(0/±1)
+        self.assertIsNone(signals["growth"])
+        self.assertIsNone(signals["margin"])
+        self.assertIsNone(signals["progress"])
+
     def test_partial_signals_average_only_available_ones(self):
         # growth/marginは算出可能(+1/+1)、進捗率は四半期無しでNone、修正は開示取得不可でNone
         entry = {
