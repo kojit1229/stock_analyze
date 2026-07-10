@@ -985,6 +985,20 @@ async function loadScores() {
   return _scoreCache;
 }
 
+let _aiAnalysisIdxCache = null;
+async function loadAiAnalysisIndex() {
+  if (_aiAnalysisIdxCache) return _aiAnalysisIdxCache;
+  try {
+    const res = await fetch("data/analysis/seen.json", { cache: "no-cache" });
+    if (!res.ok) throw new Error(String(res.status));
+    const data = await res.json();
+    _aiAnalysisIdxCache = (data && Array.isArray(data.items)) ? data : { items: [] };
+  } catch (e) {
+    _aiAnalysisIdxCache = { items: [] };
+  }
+  return _aiAnalysisIdxCache;
+}
+
 const ANALYSIS_KEY = "kessan_analysis_v1";
 function loadAnalysisState() {
   try {
@@ -1812,6 +1826,46 @@ async function renderAnalysisBody(code) {
       if (btn2) btn2.disabled = false;
     }
   };
+}
+
+// ---------------------------------------------------------------------------
+// AI分析タブ (Actionsが決算発表検知時に自動生成したAI分析MDの一覧/閲覧)
+// ---------------------------------------------------------------------------
+route("ai-analysis", async (app, rest) => {
+  const path = rest && rest[0] ? decodeURIComponent(rest[0]) : null;
+  if (path) return renderAiAnalysisDetail(app, path);
+  const idx = await loadAiAnalysisIndex();
+  const items = idx.items || [];
+  app.innerHTML = `
+    <div class="page-head"><h1>AI分析</h1><span class="sub">決算発表を検知しAIが自動生成した分析レポート(マイ銘柄のみ)</span></div>
+    ${items.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>銘柄</th><th>開示</th><th>公表日時</th><th>生成日時</th></tr></thead>
+      <tbody>${items.map((it) => `
+        <tr>
+          <td class="code-cell">${h(it.code)} ${h(it.name)}</td>
+          <td><a class="link" href="#/ai-analysis/${encodeURIComponent(it.path)}">${h(it.title)}</a></td>
+          <td>${h(fmtDateTime(it.published_at))}</td>
+          <td>${h(fmtDateTime(it.generated_at))}</td>
+        </tr>`).join("")}</tbody></table></div>`
+      : '<div class="empty">まだAI分析レポートがありません。マイ銘柄の決算発表を検知すると自動生成されます。</div>'}`;
+});
+
+async function renderAiAnalysisDetail(app, path) {
+  app.innerHTML = '<div class="loading">読み込み中…</div>';
+  let text = null;
+  try {
+    const res = await fetch("data/analysis/" + path, { cache: "no-cache" });
+    if (res.ok) text = await res.text();
+  } catch (e) { /* 下でエラー表示 */ }
+  if (!app.isConnected) return;
+  if (text == null) {
+    app.innerHTML = `<div class="page-head"><h1>AI分析</h1></div>
+      <div class="empty">レポートを読み込めませんでした。<br><a class="link" href="#/ai-analysis">← 一覧へ戻る</a></div>`;
+    return;
+  }
+  app.innerHTML = `
+    <div class="page-head"><h1>AI分析</h1><a class="link" href="#/ai-analysis" style="margin-left:auto">← 一覧へ戻る</a></div>
+    <div class="card"><pre style="white-space:pre-wrap;font-family:inherit">${h(text)}</pre></div>`;
 }
 
 // ---------------------------------------------------------------------------
