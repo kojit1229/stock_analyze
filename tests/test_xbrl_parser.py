@@ -74,6 +74,30 @@ class TestXbrlParser(unittest.TestCase):
         with self.assertRaises(xp.XbrlParseError):
             xp.parse_summary(None)
 
+    # インラインXBRL (ix:nonFraction/ix:nonNumeric) 対応 (W2-1: 実データ検証で判明した形式) --
+
+    def test_inline_xbrl_nonfraction_scale_and_period_context_are_applied(self):
+        """ix:nonFraction は name属性で要素を識別し、scale属性 (10のべき乗) を
+        掛けて実際の値にすること。前期の値が文書順で先に出現しても、期間定義
+        (endDate) を見て当期の値 (3,700 * 10^6) を採用すること。"""
+        xbrl = _read_fixture("xbrl_summary_inline_ixbrl.xml")
+        result = xp.parse_summary(xbrl)
+        self.assertEqual(result["net_sales"], 3_700_000_000.0)
+        self.assertTrue(result["consolidated"])
+
+    def test_inline_xbrl_nonfraction_sign_attribute_is_negated(self):
+        """ix:nonFraction の負数は △/▲ ではなく sign="-" 属性で表されること。"""
+        xbrl = _read_fixture("xbrl_summary_inline_ixbrl.xml")
+        result = xp.parse_summary(xbrl)
+        self.assertEqual(result["operating_income"], -240_000_000.0)
+
+    def test_inline_xbrl_revision_flag_detected_via_name_attribute(self):
+        """ix:nonNumeric の業績予想修正フラグは name属性 (実データの正式タグ名
+        CorrectionOfConsolidatedFinancialForecastInThisQuarter) で検出すること。"""
+        xbrl = _read_fixture("xbrl_summary_inline_ixbrl.xml")
+        result = xp.parse_summary(xbrl)
+        self.assertIs(result["forecast_revised"], True)
+
     def test_to_number_handles_plain_and_comma(self):
         self.assertEqual(xp._to_number("1,234"), 1234.0)
         self.assertEqual(xp._to_number("△1,234"), -1234.0)

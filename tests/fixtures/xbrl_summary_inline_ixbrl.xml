@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  合成フィクスチャ: 実際にTDnetから取得したインラインXBRL(iXBRL、拡張子.htm)の
+  構造を模した最小構成 (2026-07-10, W2-1で実データを検証して作成)。
+
+  実データとの違いに注意:
+  - 値は専用タグ (<tse-ed-t:NetSales>) ではなく <ix:nonFraction name="..."> の
+    name属性で表される。
+  - 符号はテキストの △/▲ ではなく sign="-" 属性で表される。
+  - 表示値はそのままでなく scale 属性 (10のべき乗) を掛けて実際の値になる
+    (このフィクスチャでは scale="6" = 百万円単位)。
+  - 業績予想の修正有無は ix:nonNumeric の name 属性で判定する
+    (実データでの正式タグ名 CorrectionOfConsolidatedFinancialForecastInThisQuarter)。
+-->
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"
+      xmlns:xbrli="http://www.xbrl.org/2003/instance"
+      xmlns:tse-ed-t="http://www.xbrl.tdnet.info/jp/br/tdnet/t/ed/2013-08-31">
+<head/>
+<body>
+  <xbrli:context id="CurrentYearDuration_ConsolidatedMember_ResultMember">
+    <xbrli:entity><xbrli:identifier scheme="http://www.tse.or.jp/sicc">00000</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2025-04-01</xbrli:startDate><xbrli:endDate>2026-03-31</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="PriorYearDuration_ConsolidatedMember_ResultMember">
+    <xbrli:entity><xbrli:identifier scheme="http://www.tse.or.jp/sicc">00000</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2024-04-01</xbrli:startDate><xbrli:endDate>2025-03-31</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+
+  <!-- 前期の売上高が文書順で先に出現する (期間定義を見ずに文書順で採用すると誤る) -->
+  <ix:nonFraction contextRef="PriorYearDuration_ConsolidatedMember_ResultMember" decimals="-6"
+                  scale="6" format="ixt:numdotdecimal" name="tse-ed-t:NetSales" unitRef="JPY">3,000</ix:nonFraction>
+  <!-- 当期の売上高 (本来採用すべき値。3,700 * 10^6 = 3,700,000,000) -->
+  <ix:nonFraction contextRef="CurrentYearDuration_ConsolidatedMember_ResultMember" decimals="-6"
+                  scale="6" format="ixt:numdotdecimal" name="tse-ed-t:NetSales" unitRef="JPY">3,700</ix:nonFraction>
+
+  <!-- 営業利益 (当期・赤字。sign="-" で符号を表す。240 * 10^6 = 240,000,000 の負数) -->
+  <ix:nonFraction contextRef="CurrentYearDuration_ConsolidatedMember_ResultMember" decimals="-6"
+                  scale="6" sign="-" format="ixt:numdotdecimal" name="tse-ed-t:OperatingIncome" unitRef="JPY">240</ix:nonFraction>
+
+  <!-- 業績予想の修正有無 (実データの正式タグ名。値は 有/無 のような和文の場合もあるため true 判定文字列の1つを使う) -->
+  <ix:nonNumeric contextRef="CurrentYearDuration_ConsolidatedMember_ResultMember"
+                 name="tse-ed-t:CorrectionOfConsolidatedFinancialForecastInThisQuarter">true</ix:nonNumeric>
+</body>
+</html>
