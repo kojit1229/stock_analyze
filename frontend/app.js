@@ -132,6 +132,15 @@ function stars(n) {
   n = Math.max(0, Math.min(5, n || 0));
   return "★".repeat(n) + "☆".repeat(5 - n);
 }
+// iOS Safari 対策: new Date(文字列) は使わず成分分解でパースする
+function addDaysISO(iso, days) {
+  const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return iso;
+  const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  dt.setDate(dt.getDate() + days);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
+}
 function statusBadge(status) {
   return status === "取得済み"
     ? '<span class="badge ok">取得済み</span>'
@@ -173,11 +182,14 @@ window.addEventListener("hashchange", render);
 // ホーム画面
 // ---------------------------------------------------------------------------
 route("home", async (app) => {
-  const [d, alertData, myList, pricesData] = await Promise.all([
-    api.get("/home"), loadAlerts(), api.get("/mystocks"), loadPrices(),
+  const [d, alertData, myList, pricesData, aiIdx] = await Promise.all([
+    api.get("/home"), loadAlerts(), api.get("/mystocks"), loadPrices(), loadAiAnalysisIndex(),
   ]);
   const upcoming = d.registered_upcoming || [];
   const watch = d.watchlist || [];
+  // F-1: 「今日見るべきもの」— 決算当日/翌日のマイ銘柄・本日のサプライズ・新着AI分析を
+  // 優先度順に出す。データが無いセクションは空カードを出さず丸ごと非表示にする。
+  const priorityHtml = homePriorityHtml(d, upcoming, alertData, aiIdx);
   // マイ銘柄の本日サマリ
   let mySummary = "";
   {
@@ -205,6 +217,7 @@ route("home", async (app) => {
       <h1>ホーム</h1>
       <span class="sub">${fmtDate(d.date)} 時点</span>
     </div>
+    ${priorityHtml}
     <div class="grid cols-4" style="margin-bottom:16px">
       <div class="card stat"><div class="label">今日の決算予定</div><div class="value accent">${d.todays_count}</div></div>
       <div class="card stat"><div class="label">未確認の決算短信</div><div class="value warn">${d.unread_disclosures}</div></div>
@@ -260,6 +273,50 @@ route("home", async (app) => {
       </div>
     </div>`;
 });
+
+// F-1: ホーム最上部「今日見るべきもの」。①本日/明日決算のマイ銘柄 ②本日のサプライズ
+// アラート ③新着AI分析、の優先度順。各セクションはデータが無ければ非表示にし、
+// 3つとも無ければカード自体を出さない(空カードを出さない)。
+function homePriorityHtml(d, upcoming, alertData, aiIdx) {
+  const today = d.date;
+  const tomorrow = addDaysISO(d.date, 1);
+  const earningsSoon = upcoming.filter((s) => s.announce_date === today || s.announce_date === tomorrow);
+  const surpriseToday = (alertData.alerts || [])
+    .filter((a) => (a.date || "") === today && isSurpriseAlertType(a.type));
+  const aiNew = (aiIdx.items || [])
+    .slice()
+    .sort((a, b) => ((b.generated_at || "") < (a.generated_at || "") ? -1 : 1))
+    .slice(0, 3);
+  if (!earningsSoon.length && !surpriseToday.length && !aiNew.length) return "";
+
+  const row = (href, left, right) => `<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)">
+    <a class="link" href="${h(href)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${left}</a>${right || ""}</div>`;
+
+  const sections = [];
+  if (earningsSoon.length) {
+    sections.push(`<div style="margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;margin-bottom:4px">📅 本日・明日決算のマイ銘柄</div>
+      ${earningsSoon.map((s) => row(`#/stock/${h(s.code)}`, `${h(s.code)} ${h(s.name)}`,
+        `<span class="badge ${s.announce_date === today ? "warn" : "market"}">${s.announce_date === today ? "本日" : "明日"}</span>`)).join("")}
+    </div>`);
+  }
+  if (surpriseToday.length) {
+    sections.push(`<div style="margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;margin-bottom:4px">⚡ 本日のサプライズアラート</div>
+      ${surpriseToday.map((a) => row(`#/analysis/${h(a.code)}`, `${h(a.code)} ${h(a.name || "")} — ${h(a.title || "")}`)).join("")}
+    </div>`);
+  }
+  if (aiNew.length) {
+    sections.push(`<div>
+      <div style="font-weight:700;font-size:13px;margin-bottom:4px">🧠 新着AI分析</div>
+      ${aiNew.map((it) => row(`#/ai-analysis/${encodeURIComponent(it.path)}`, `${h(it.code)} ${h(it.name)} — ${h(it.title)}`)).join("")}
+    </div>`);
+  }
+  return `<div class="card" style="margin-bottom:16px">
+    <h2>🎯 今日見るべきもの</h2>
+    ${sections.join("")}
+  </div>`;
+}
 
 function scheduleMiniTable(items) {
   if (!items || !items.length) return '<div class="empty">本日の決算予定はありません</div>';
@@ -1125,6 +1182,23 @@ const ALERT_ICONS = {
 function alertIcon(t) {
   if (t && t.indexOf("disclosure") === 0) return "📢";
   return ALERT_ICONS[t] || "🔔";
+}
+
+// F-1/F-2: 「サプライズ」系アラート種別 (上方/下方修正・増配/減配・黒字転換・最高益更新)。
+// scripts/generate_alerts.py の SURPRISE_TITLE_RULES / financial_surprises と対応。
+const SURPRISE_ALERT_TYPES = new Set([
+  "surprise_turnaround", "surprise_record_profit",
+  "disclosure_業績予想上方修正", "disclosure_業績予想下方修正",
+  "disclosure_配当増配", "disclosure_配当減配",
+]);
+function isSurpriseAlertType(t) {
+  return SURPRISE_ALERT_TYPES.has(t);
+}
+// アラートの根拠バッジ (basis: "XBRL" / "財務" / "タイトル"。無ければ非表示)
+function surpriseBasisBadge(basis) {
+  if (!basis) return "";
+  const cls = basis === "XBRL" ? "ok" : basis === "財務" ? "reg" : "pending";
+  return `<span class="badge ${cls}" title="根拠: ${h(basis)}由来">${h(basis)}</span>`;
 }
 
 function loadAppSettings() {
