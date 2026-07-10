@@ -4,6 +4,12 @@
 
 [要件定義](docs/requirements.md) に基づき、MVPスコープ（決算日程一覧・時価総額での絞り込み・マイ銘柄登録・決算短信の自動取得と閲覧）を実装しています。
 
+> **⚠️ `kessan/`（Pythonバックエンド）は開発凍結・ローカルデモ専用です。** 本番の実データは
+> 下記の [GitHub Actions 静的パイプライン](.github/workflows/update-data.yml)（`frontend/data/*.json`
+> を生成）であり、`kessan/` への実データ接続は行いません。`kessan/` は `MockDisclosureSource`
+> によるサンプルデータのみで動作するローカル起動用の参考実装として維持されています
+> （二重実装を避けるため、実データ接続の拡張は行わない方針）。
+
 ## 🌐 GitHub Pages で今すぐ試す
 
 **https://kojit1229.github.io/stock_analyze/**
@@ -47,7 +53,7 @@
 - Python 3.8+（3.11 で検証）
 - モダンブラウザ
 
-## 起動
+## 起動（`kessan/` ローカルデモ・開発凍結中）
 
 ```bash
 python run.py            # http://127.0.0.1:8000 で起動

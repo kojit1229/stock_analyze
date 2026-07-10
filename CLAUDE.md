@@ -4,6 +4,11 @@
 フロントは**バニラJS SPA**（`frontend/`、GitHub Pages配信、iOS Safari利用者あり）、
 バックエンドは標準ライブラリのみのPython（`kessan/`、ローカル実行用）。
 
+**`kessan/` は開発凍結・ローカルデモ専用**（`MockDisclosureSource` によるサンプル
+データのみ）。本番の実データは `.github/workflows/*.yml` 経由の静的パイプライン
+（`frontend/data/*.json` を生成）であり、`kessan/` への実データ接続はしない
+（二重実装を避けるため。詳細は README.md）。
+
 ## よく使うコマンド
 
 ```bash
