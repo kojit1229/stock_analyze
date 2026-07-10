@@ -42,7 +42,11 @@ SYSTEM_PROMPT = (
     "あなたは個人投資家向けの決算分析アシスタントです。与えられたXBRL実績・進捗率・"
     "業績予想修正の有無・市況概況をもとに、事実確認と会社予想・前年同期からの乖離点を"
     "整理してください。短期売買のシグナルや売買推奨は出さず、長期の投資規律の維持に"
-    "資する客観的な事実整理に徹してください。断定できない推測は推測と明記してください。"
+    "資する客観的な事実整理に徹してください。断定できない推測は推測と明記してください。\n\n"
+    "出力は必ず見出し `## 3行要約` から始め、直後に箇条書き(`- `)で3行、この開示の要点を"
+    "簡潔に書いてください。3行要約の後に空行を1つ入れ、通常の見出し構成で詳細な事実整理を"
+    "続けてください(3行要約はホーム画面・一覧画面の軽量表示に機械的に抽出して使うため、"
+    "この形式を厳守してください)。"
 )
 
 
@@ -180,6 +184,32 @@ def call_claude_cli(material, api_key=None):
     return text
 
 
+def extract_summary(body_text):
+    """分析本文冒頭の `## 3行要約` セクションから箇条書き行を抽出して返す(P3-3)。
+    見出しが無い/直後に箇条書きが1行も続かない場合は空リストを返す(呼び出し側でwarnログを出す。
+    抽出失敗は生成自体の失敗にはしない)。"""
+    lines = body_text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip() == "## 3行要約":
+            start = i + 1
+            break
+    if start is None:
+        return []
+    bullets = []
+    for line in lines[start:]:
+        s = line.strip()
+        if not s:
+            if bullets:
+                break
+            continue  # 見出し直後の空行はスキップ
+        if s.startswith("- ") or s.startswith("* "):
+            bullets.append(s[2:].strip())
+        else:
+            break  # 箇条書きでない行(別の見出し等)に達したら終了
+    return bullets
+
+
 def save_analysis(data_dir, code, name, material, body_text, now):
     disc_id = material["disclosure"]["id"]
     filename = f"{code}_{disc_id}.md"
@@ -194,7 +224,11 @@ def save_analysis(data_dir, code, name, material, body_text, now):
     )
     with open(os.path.join(out_dir, filename), "w", encoding="utf-8") as f:
         f.write(header + body_text + "\n")
-    return filename
+    summary = extract_summary(body_text)
+    if not summary:
+        log(f"警告: {filename} から3行要約を抽出できませんでした"
+            f"(本文冒頭に'## 3行要約'の箇条書きが無い可能性)。summaryは空配列で記録します")
+    return filename, summary
 
 
 def update_manifest(data_dir, item, now):
@@ -273,12 +307,12 @@ def run(data_dir, watchlist_path, user_path, api_key, now, call_fn=call_claude, 
         code = str(d.get("code"))
         material = bai.build_analysis_input(code, d, data_dir)
         text = call_fn(material, api_key)
-        filename = save_analysis(data_dir, code, names.get(code, ""), material, text, now)
+        filename, summary = save_analysis(data_dir, code, names.get(code, ""), material, text, now)
         item = {
             "disclosure_id": material["disclosure"]["id"], "code": code, "name": names.get(code, ""),
             "title": material["disclosure"]["title"], "doc_type": material["disclosure"]["doc_type"],
             "published_at": material["disclosure"]["published_at"], "path": filename,
-            "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
+            "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S+09:00"), "summary": summary,
         }
         update_manifest(data_dir, item, now)
         notify_fn(item, now)
