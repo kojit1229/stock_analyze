@@ -3,6 +3,7 @@ import datetime
 import importlib.util
 import os
 import sys
+import tempfile
 import unittest
 
 _spec = importlib.util.spec_from_file_location(
@@ -407,6 +408,31 @@ class TestGenerate(unittest.TestCase):
                                  disclosures=discs, financials=financials)
         new_only = [a for a in second_run if ga.alert_key(a) not in known]
         self.assertEqual(new_only, [])
+
+
+class TestLoadJsonFailLoud(unittest.TestCase):
+    """alerts.json 等の冪等性台帳が壊れている場合に黙殺せず例外送出すること
+    (未存在時は従来どおり fallback を返す)。"""
+
+    def test_missing_file_returns_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "alerts.json")
+            self.assertEqual(ga.load_json(path, {"alerts": []}), {"alerts": []})
+
+    def test_corrupt_existing_file_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "alerts.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{not valid json")
+            with self.assertRaises(RuntimeError):
+                ga.load_json(path, {"alerts": []})
+
+    def test_valid_existing_file_parses_normally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "alerts.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"alerts": [{"code": "1301"}]}')
+            self.assertEqual(ga.load_json(path, {}), {"alerts": [{"code": "1301"}]})
 
 
 if __name__ == "__main__":

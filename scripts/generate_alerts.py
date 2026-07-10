@@ -87,11 +87,16 @@ def log(msg):
 
 
 def load_json(path, fallback):
+    """ファイル未存在は fallback を返すが、存在するファイルの読込・パース失敗は
+    黙殺せず例外を送出する(alerts.json 等の冪等性台帳の破損を空扱いにして
+    再通知・再処理を発生させないため。FI原則)。"""
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return fallback
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"{path} の読み込みに失敗しました(壊れている可能性): {e}") from e
 
 
 def parse_user_data(user_payload):

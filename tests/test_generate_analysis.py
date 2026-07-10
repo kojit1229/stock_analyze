@@ -66,6 +66,44 @@ class TestTargetCodes(unittest.TestCase):
                 gan.target_codes(os.path.join(tmp, "nope.json"), os.path.join(tmp, "nope2.json")), set())
 
 
+class TestLoadJsonFailLoud(unittest.TestCase):
+    """seen.json 等の冪等性台帳が壊れている場合に黙殺せず例外送出すること
+    (未存在時は従来どおり fallback を返す)。"""
+
+    def test_missing_file_returns_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "seen.json")
+            self.assertEqual(gan.load_json(path, {"items": []}), {"items": []})
+
+    def test_corrupt_existing_file_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "seen.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{not valid json")
+            with self.assertRaises(RuntimeError):
+                gan.load_json(path, {"items": []})
+
+    def test_valid_existing_file_parses_normally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "seen.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"items": [{"disclosure_id": "K1"}]}')
+            self.assertEqual(gan.load_json(path, {}), {"items": [{"disclosure_id": "K1"}]})
+
+    def test_corrupt_seen_json_makes_run_fail_loud(self):
+        """run() は seen_ids_of() 経由で seen.json を読む。破損時は例外を伝播し、
+        exit≠0 につながる(黙殺しない)。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = _setup_data_dir(tmp)
+            wl_path, user_path = _setup_config(tmp, watchlist_codes=["8125"])
+            os.makedirs(os.path.join(data_dir, "analysis"), exist_ok=True)
+            with open(os.path.join(data_dir, "analysis", "seen.json"), "w", encoding="utf-8") as f:
+                f.write("{not valid json")
+            with self.assertRaises(RuntimeError):
+                gan.run(data_dir, wl_path, user_path, "dummy-key", NOW,
+                        call_fn=lambda m, k: "x", notify_fn=lambda item, now: True)
+
+
 class TestRun(unittest.TestCase):
     def test_generates_saves_notifies_and_dedupes_on_rerun(self):
         with tempfile.TemporaryDirectory() as tmp:
