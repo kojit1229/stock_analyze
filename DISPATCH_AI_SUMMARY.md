@@ -1,5 +1,14 @@
 # 依頼プロンプト(別チャットへの貼り付け用) — 決算ナビ AI要約機能
 
+> **2026-07-10時点の注記**: AI決算分析パイプラインは実装済み
+> (`scripts/generate_analysis.py` + `frontend/data/analysis/*.md` の長文レポート方式。
+> フロントは `#/ai-analysis` から表示。生成対象・上限は `--max-items`/`--max-cost-usd`
+> で制御、GitHub Actions(API backend)またはローカルバッチ`loop/analyze-kessan.sh`
+> (claude-cli backend)から実行)。本メモが前提とする「`data/summaries/*.json` への
+> 3行要約」という設計とは異なる実装(長文Markdownレポート)で決着している。
+> 本メモの「3行要約(`summaries/*.json`)」部分だけは実装されておらず、
+> 将来の追加候補として本文をそのまま残す(不要になったら archive 扱いにする)。
+
 新着決算短信をAIが3行要約し、フロントで「あれば表示」する機能を追加してください。
 
 **目的(1文)**: 新着決算短信をAIが3行要約し、フロントで「あれば表示」する機能を追加する。
