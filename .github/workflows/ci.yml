@@ -22,6 +22,8 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Smoke test server boot & API
         run: python scripts/smoke.py
+      - name: AI分析manifest整合検証 (analysis/が無い/空でも正常終了)
+        run: python scripts/check_analysis.py --data frontend/data
       - name: Check static (GitHub Pages) local API
         run: node scripts/check_local_api.mjs
       - name: Install frontend dev dependencies (jsdom)
