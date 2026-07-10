@@ -62,34 +62,44 @@ class TestTargetCodes(unittest.TestCase):
 
 
 class TestRun(unittest.TestCase):
-    def test_generates_saves_and_dedupes_on_rerun(self):
+    def test_generates_saves_notifies_and_dedupes_on_rerun(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = _setup_data_dir(tmp)
             wl_path, user_path = _setup_config(tmp, watchlist_codes=["8125"])
-            calls = []
+            calls, notified = [], []
 
             def fake_call(material, api_key):
                 calls.append(material["code"])
                 return "分析結果テキスト"
 
-            saved = gan.run(data_dir, wl_path, user_path, "dummy-key", NOW, call_fn=fake_call)
+            def fake_notify(item, now):
+                notified.append(item["disclosure_id"])
+                return True
+
+            saved = gan.run(data_dir, wl_path, user_path, "dummy-key", NOW,
+                             call_fn=fake_call, notify_fn=fake_notify)
             self.assertEqual(len(saved), 1)
             self.assertEqual(calls, ["8125"])
+            self.assertEqual(notified, ["K8125"])  # Issue通知は新規生成時のみ呼ばれる
             out_path = os.path.join(data_dir, "analysis", "8125_K8125.md")
             self.assertTrue(os.path.exists(out_path))
             with open(out_path, encoding="utf-8") as f:
                 self.assertIn("分析結果テキスト", f.read())
 
-            # 同一disclosure_idの再実行では処理済み(seen.json)により何もしない(冪等)
-            saved2 = gan.run(data_dir, wl_path, user_path, "dummy-key", NOW, call_fn=fake_call)
+            # 同一disclosure_idの再実行では処理済み(seen.json)により何もしない(冪等・二重通知なし)
+            saved2 = gan.run(data_dir, wl_path, user_path, "dummy-key", NOW,
+                              call_fn=fake_call, notify_fn=fake_notify)
             self.assertEqual(saved2, [])
             self.assertEqual(len(calls), 1)
+            self.assertEqual(len(notified), 1)
 
     def test_no_target_codes_returns_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = _setup_data_dir(tmp)
             wl_path, user_path = _setup_config(tmp)
-            self.assertEqual(gan.run(data_dir, wl_path, user_path, "k", NOW, call_fn=lambda m, k: "x"), [])
+            saved = gan.run(data_dir, wl_path, user_path, "k", NOW,
+                             call_fn=lambda m, k: "x", notify_fn=lambda item, now: True)
+            self.assertEqual(saved, [])
 
     def test_api_failure_is_not_swallowed(self):
         """API失敗時はexit≠0につながるよう例外をそのまま伝播する(黙殺しない)。"""
@@ -101,9 +111,25 @@ class TestRun(unittest.TestCase):
                 raise RuntimeError("API error")
 
             with self.assertRaises(RuntimeError):
-                gan.run(data_dir, wl_path, user_path, "k", NOW, call_fn=failing_call)
+                gan.run(data_dir, wl_path, user_path, "k", NOW,
+                        call_fn=failing_call, notify_fn=lambda item, now: True)
             # 失敗時はmanifestを更新しない(中途半端な処理済み記録を残さない)
             self.assertEqual(gan.seen_ids_of(data_dir), set())
+
+
+class TestCreateIssue(unittest.TestCase):
+    def test_no_token_or_repo_skips_without_network_call(self):
+        """GITHUB_TOKEN/GITHUB_REPOSITORYが無い環境ではネットワークに出ずFalseを返す
+        (generate_alerts.create_issueと同じフェイルセーフ)。"""
+        backup = {k: os.environ.pop(k, None) for k in ("GITHUB_TOKEN", "GITHUB_REPOSITORY")}
+        try:
+            item = {"code": "8125", "name": "テスト", "path": "8125_K8125.md", "title": "決算短信のお知らせ",
+                    "doc_type": "決算短信", "published_at": "2026-07-09T16:00:00"}
+            self.assertFalse(gan.create_issue(item, NOW))
+        finally:
+            for k, v in backup.items():
+                if v is not None:
+                    os.environ[k] = v
 
 
 if __name__ == "__main__":

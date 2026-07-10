@@ -136,7 +136,39 @@ def update_manifest(data_dir, item, now):
         json.dump(manifest, f, ensure_ascii=False, separators=(",", ":"))
 
 
-def run(data_dir, watchlist_path, user_path, api_key, now, call_fn=call_claude):
+def create_issue(item, now):
+    """分析MD生成時にGitHub Issueを起票し@メンションで通知する
+    (generate_alerts.create_issue と同じ経路・同じユーザー名)。"""
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not token or not repo:
+        log("GITHUB_TOKEN/GITHUB_REPOSITORY が無いため Issue 通知はスキップ")
+        return False
+    owner = repo.split("/")[0]
+    link = f"https://github.com/{repo}/blob/main/frontend/data/analysis/{item['path']}"
+    body = {
+        "title": f"🧠 AI決算分析 {item['code']} {item['name']} ({(item['published_at'] or '')[:10]})",
+        "body": (f"@{owner} {item['code']} {item['name']} の決算分析を生成しました。\n\n"
+                 f"- 開示: {item['title']} ({item['doc_type']})\n"
+                 f"- 分析: {link}\n\n"
+                 "> このIssueは決算ナビのAI分析機能が自動作成しました。確認後はクローズしてください。"),
+        "labels": ["ai-analysis"],
+    }
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/issues",
+        data=json.dumps(body).encode(), method="POST",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            log(f"AI分析Issue通知を作成: HTTP {r.status}")
+            return True
+    except Exception as e:  # noqa: BLE001
+        log(f"AI分析Issue作成に失敗: {type(e).__name__}: {e}")
+        return False
+
+
+def run(data_dir, watchlist_path, user_path, api_key, now, call_fn=call_claude, notify_fn=create_issue):
     codes = target_codes(watchlist_path, user_path)
     if not codes:
         log("分析対象銘柄(pdf_watchlist/マイ銘柄)が無いため終了")
@@ -160,6 +192,7 @@ def run(data_dir, watchlist_path, user_path, api_key, now, call_fn=call_claude):
             "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S+09:00"),
         }
         update_manifest(data_dir, item, now)
+        notify_fn(item, now)
         saved.append(item)
         log(f"分析生成: {code} {filename}")
     return saved
