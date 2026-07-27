@@ -172,9 +172,6 @@ async function render() {
   } catch (e) {
     app.innerHTML = `<div class="empty">エラー: ${h(e.message)}</div>`;
   }
-  // データ変更の可能性があるため、画面遷移のたびに自動バックアップを予約
-  // (有効時のみ。ハッシュ不変ならpushしない)
-  scheduleAutoBackup();
 }
 window.addEventListener("hashchange", render);
 
@@ -237,8 +234,8 @@ route("home", async (app) => {
           <td><span class="star">${stars(a.importance)}</span></td>
           <td>${alertIcon(a.type)} ${h(a.title || "")}</td>
           <td class="num">${h(a.detail || "")}</td></tr>`).join("")}
-        </tbody></table></div>` : `<div class="empty">アラートはありません。マイ銘柄の終値アラート (前日比変動・52週高安・出来高急増・決算前日/当日・重要開示・3日連続続落/続伸・決算への反応) は
-        <a class="link" href="#/settings">⚙ 設定</a>でgitへの自動バックアップを有効にすると、平日の引け後に自動チェックされます。</div>`}
+        </tbody></table></div>` : `<div class="empty">アラートはありません。終値アラート機能は現在停止中です
+        (入力データの自動コミット経路を廃止したため、新しいアラートは生成されません)。</div>`}
     </div>
     <div class="grid cols-2">
       <div class="card">
@@ -502,7 +499,7 @@ route("mystocks", async (app) => {
     <div class="chips" id="impChips">
       ${impChip("", "重要度: すべて")}${impChip("5", "★5のみ")}${impChip("4", "★4以上")}${impChip("3", "★3以上")}${impChip("2", "★2以上")}
     </div>
-    <div class="meta-line" style="margin-bottom:12px">マイ銘柄・閲覧状態・分析コメントはこのブラウザにのみ保存されます。<a class="link" href="#/settings">⚙ 設定</a>からgitへの自動バックアップを有効にすると、端末を変えても復元でき、終値アラートのメール通知も使えます。</div>
+    <div class="meta-line" style="margin-bottom:12px">マイ銘柄・閲覧状態・分析コメントはこのブラウザにのみ保存されます。端末変更やキャッシュクリアに備える場合は、上の「⬇ バックアップ / ⬆ 復元」で手動JSONを保存・復元してください。</div>
     ${items.length === 0 ? `<div class="empty">${d.count === 0 ? 'まだ銘柄が登録されていません。<a class="link" href="#/schedule">決算予定一覧</a>から登録しましょう。' : "この重要度のマイ銘柄はありません。"}</div>` : `
     <div class="table-wrap"><table>
       <thead><tr><th>コード</th><th>銘柄名</th><th>保有区分</th><th>重要度</th><th>終値${prices.date ? `<span class="badge market" style="margin-left:4px">${h(fmtDate(prices.date))}</span>` : ""}</th><th>前日比</th><th>次回決算</th><th>取得状況</th><th>メモ</th><th>操作</th></tr></thead>
@@ -1133,7 +1130,7 @@ const BACKUP_KEYS = [
   "kessan_seen_v1",      // 新着判定の既知キー
   "kessan_analysis_v1",  // 分析コメント・取得済み履歴
   "kessan_compare_v1",   // 比較銘柄リスト
-  "kessan_settings_v1",  // アラート設定・自動バックアップ設定 (Actionsも参照)
+  "kessan_settings_v1",  // アラート設定
 ];
 
 function buildBackupPayload() {
@@ -1199,12 +1196,10 @@ function restoreBackup(file) {
 }
 
 // ---------------------------------------------------------------------------
-// 設定 (アラート条件・gitへの自動バックアップ)
+// 設定 (アラート条件・PDF保存リスト編集用GitHubトークン)
 // ---------------------------------------------------------------------------
 const SETTINGS_KEY = "kessan_settings_v1";
-const GH_TOKEN_KEY = "kessan_gh_token_v1";      // トークンはバックアップに含めない
-const BACKUP_META_KEY = "kessan_backup_meta_v1"; // 最終push状態 (同じく含めない)
-const AUTO_BACKUP_MIN_MS = 10 * 60 * 1000;       // コミットのスパム防止 (最短10分)
+const GH_TOKEN_KEY = "kessan_gh_token_v1"; // トークンはバックアップに含めない
 
 // scripts/generate_alerts.py の DEFAULT_SETTINGS と同じ既定値
 const ALERT_DEFAULT_LEVELS = {
@@ -1273,98 +1268,8 @@ function repoInfo() {
   return { owner: "kojit1229", repo: "stock_analyze" };
 }
 
-function strHash(s) {
-  let x = 5381;
-  for (let i = 0; i < s.length; i++) x = ((x * 33) ^ s.charCodeAt(i)) >>> 0;
-  return x.toString(36) + ":" + s.length;
-}
-
-function loadBackupMeta() {
-  try {
-    const m = JSON.parse(localStorage.getItem(BACKUP_META_KEY));
-    if (m && typeof m === "object") return m;
-  } catch (e) { /* 初期化 */ }
-  return {};
-}
-function saveBackupMeta(meta) {
-  try { localStorage.setItem(BACKUP_META_KEY, JSON.stringify(meta)); } catch (e) { /* 無視 */ }
-}
-
-// GitHub contents API で config/user_data.json へコミットする。
-// 成功: "pushed" / 変更なし: "unchanged" / 未設定: "no-token"
-async function pushBackupToGit(manual) {
-  const token = ghToken();
-  if (!token) return "no-token";
-  const body = JSON.stringify(buildBackupPayload(), null, 1);
-  const hash = strHash(body);
-  const meta = loadBackupMeta();
-  if (!manual && meta.hash === hash) return "unchanged";
-  const { owner, repo } = repoInfo();
-  const url = `https://api.github.com/repos/${owner}/${repo}/contents/config/user_data.json`;
-  const headers = { Authorization: "Bearer " + token, Accept: "application/vnd.github+json" };
-  let sha;
-  const g = await fetch(url + "?ref=main", { headers });
-  if (g.ok) sha = (await g.json()).sha;
-  else if (g.status !== 404) throw new Error("GitHub API " + g.status + " (トークンの権限を確認してください)");
-  const put = await fetch(url, {
-    method: "PUT",
-    headers,
-    body: JSON.stringify({
-      message: "backup: ユーザーデータの自動バックアップ",
-      content: btoa(unescape(encodeURIComponent(body))),
-      branch: "main",
-      sha,
-    }),
-  });
-  if (!put.ok) {
-    const err = await put.json().catch(() => ({}));
-    throw new Error("バックアップのpushに失敗: " + (err.message || put.status));
-  }
-  saveBackupMeta({ hash, at: buildBackupPayload().exported_at, atMs: Date.now() });
-  return "pushed";
-}
-
-let _abTimer = null;
-function scheduleAutoBackup() {
-  if (!(appSettings.autoBackup && appSettings.autoBackup.enabled)) return;
-  if (!ghToken()) return;
-  if (_abTimer) clearTimeout(_abTimer);
-  _abTimer = setTimeout(() => {
-    _abTimer = null;
-    const meta = loadBackupMeta();
-    if (meta.atMs && Date.now() - meta.atMs < AUTO_BACKUP_MIN_MS) return;
-    pushBackupToGit(false).then((r) => {
-      if (r === "pushed") toast("gitへ自動バックアップしました");
-    }).catch(() => { /* 自動実行なので静かに失敗 (設定画面から手動で確認可能) */ });
-  }, 5000);
-}
-
-async function restoreFromGit() {
-  let payload = null;
-  try {
-    const res = await fetch("../config/user_data.json", { cache: "no-cache" });
-    if (res.ok) payload = await res.json();
-  } catch (e) { /* フォールバックへ */ }
-  if (!payload) {
-    try {
-      const { owner, repo } = repoInfo();
-      const res = await fetch(
-        `https://api.github.com/repos/${owner}/${repo}/contents/config/user_data.json?ref=main`,
-        { headers: { Accept: "application/vnd.github.raw+json" } });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      payload = await res.json();
-    } catch (e) {
-      toast("gitのバックアップを取得できません (まだ一度もバックアップされていない可能性): " + e.message, true);
-      return;
-    }
-  }
-  applyBackupPayload(payload);
-}
-
 route("settings", async (app) => {
   const conf = alertConf();
-  const ab = appSettings.autoBackup || {};
-  const meta = loadBackupMeta();
   const { owner, repo } = repoInfo();
   const levelRow = (k) => {
     const c = conf.levels[k];
@@ -1386,15 +1291,13 @@ route("settings", async (app) => {
     </tr>`;
   };
   app.innerHTML = `
-    <div class="page-head"><h1>設定</h1><span class="sub">アラート条件とバックアップを設定します</span></div>
+    <div class="page-head"><h1>設定</h1><span class="sub">アラート条件とGitHubトークンを設定します</span></div>
 
     <div class="card" style="margin-bottom:14px">
-      <h2>🔔 終値アラート <span class="count">重要度ごとに設定</span></h2>
+      <h2>🔔 終値アラート <span class="count">現在停止中</span></h2>
       <div class="meta-line" style="margin-bottom:10px">
-        平日の引け後 (15:35以降のデータ更新時)、マイ銘柄の終値をチェックしてアラートを生成します。
-        アラートはホーム画面に表示され、メール通知ONの場合はGitHubのIssueが作成されて通知メールが届きます。<br>
-        <b>※ アラートを使うには、下の「gitへの自動バックアップ」を有効にしてください</b>
-        (GitHub Actionsがマイ銘柄と設定を読むため)。
+        <b>終値アラート機能は現在停止中です</b> (入力データの自動コミット経路を廃止したため)。
+        以下の条件は保存されますが、現在はどこにも作用しません。
       </div>
       <div class="table-wrap"><table id="alertTable">
         <thead><tr><th>重要度</th><th>株価変動</th><th>52週高値/安値</th><th>出来高急増</th><th>決算前日/当日</th><th title="業績予想修正・配当予想修正・自己株式取得・訂正決算短信の開示">重要開示</th><th title="終値ベースで3日以上の連続下落/連続上昇">3日連続±</th><th title="決算発表の当日/翌営業日に閾値以上動いたとき">決算反応</th></tr></thead>
@@ -1408,11 +1311,10 @@ route("settings", async (app) => {
     </div>
 
     <div class="card" style="margin-bottom:14px">
-      <h2>💾 gitへの自動バックアップ</h2>
+      <h2>🔑 GitHubトークン (PDF保存リスト編集用)</h2>
       <div class="meta-line" style="margin-bottom:10px">
-        マイ銘柄・閲覧状態・分析コメント・この設定を、リポジトリ <b>${h(owner)}/${h(repo)}</b> の
-        <code>config/user_data.json</code> へ自動コミットします (変更があったとき、最短10分間隔)。
-        端末変更やキャッシュクリア後も「gitから復元」で戻せます。
+        <a class="link" href="#/disclosures">決算短信</a>画面で選択した銘柄を、リポジトリ <b>${h(owner)}/${h(repo)}</b> の
+        <code>config/pdf_watchlist.json</code> へ追加するために使用します。個人状態のバックアップには使用しません。
       </div>
       <div class="field" style="max-width:560px">
         <label>GitHub トークン (Fine-grained PAT / このリポジトリの Contents: Read and write 権限のみ)</label>
@@ -1426,17 +1328,11 @@ route("settings", async (app) => {
         Repository access = Only select repositories (${h(repo)}) / Permissions = Contents: Read and write。
         トークンはこのブラウザにのみ保存され、バックアップファイルには含まれません。
       </div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="ab_enabled" ${ab.enabled ? "checked" : ""}> 自動バックアップを有効にする</label>
-        <button class="btn small" id="backupNow">今すぐバックアップ</button>
-        <button class="btn small ghost" id="restoreGit">gitから復元</button>
-        <span class="meta-line" id="ab_status" style="margin:0">${meta.at ? `最終バックアップ: ${h(meta.at)}` : "まだバックアップされていません"}</span>
-      </div>
     </div>
 
     <div class="card">
       <h2>📥 ファイルへのバックアップ</h2>
-      <div class="meta-line">gitを使わない手動バックアップは<a class="link" href="#/mystocks">マイ銘柄</a>画面の「⬇ バックアップ / ⬆ 復元」から行えます。</div>
+      <div class="meta-line">個人状態のバックアップは<a class="link" href="#/mystocks">マイ銘柄</a>画面の「⬇ バックアップ / ⬆ 復元」から手動JSONで行えます。</div>
     </div>`;
 
   const collectAlerts = () => {
@@ -1468,28 +1364,6 @@ route("settings", async (app) => {
     try { localStorage.setItem(GH_TOKEN_KEY, el("gh_token").value.trim()); } catch (e) { /* 無視 */ }
     toast("トークンを保存しました");
   };
-  el("ab_enabled").onchange = () => {
-    appSettings.autoBackup = { enabled: el("ab_enabled").checked };
-    saveAppSettings();
-    if (el("ab_enabled").checked && !ghToken()) toast("トークンを登録すると自動バックアップが動き始めます", true);
-    else toast("自動バックアップ設定を保存しました");
-  };
-  el("backupNow").onclick = async () => {
-    el("backupNow").disabled = true;
-    try {
-      const r = await pushBackupToGit(true);
-      if (r === "no-token") toast("先にGitHubトークンを保存してください", true);
-      else {
-        toast("gitへバックアップしました");
-        el("ab_status").textContent = "最終バックアップ: " + (loadBackupMeta().at || "");
-      }
-    } catch (e) {
-      toast(e.message, true);
-    } finally {
-      el("backupNow").disabled = false;
-    }
-  };
-  el("restoreGit").onclick = restoreFromGit;
 });
 
 const COMPARE_KEY = "kessan_compare_v1";
