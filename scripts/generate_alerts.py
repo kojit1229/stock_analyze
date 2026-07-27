@@ -5,8 +5,10 @@
 - frontend/data/prices.json   : 終値・前日比・52週高安・出来高 (fetch_real_data.py が生成)
 - frontend/data/schedule.json : 決算発表予定
 - frontend/data/stocks.json   : 銘柄名の解決用
-- config/user_data.json       : アプリが自動バックアップしたユーザーデータ
-                                (マイ銘柄+重要度、アラート設定 kessan_settings_v1)
+- config/user_data.json       : ユーザーデータ (マイ銘柄+重要度、アラート設定
+                                kessan_settings_v1)。個人状態の自動コミット経路の
+                                廃止に伴い現在は生成されないため、このファイルが
+                                無い環境ではアラート生成はスキップされる (=停止中)
 
 出力:
 - frontend/data/alerts.json   : アプリのホーム画面に表示するアラート
@@ -482,7 +484,7 @@ def main():
 
     user = load_json(args.user, None)
     if not user:
-        log(f"{args.user} が無いためスキップ (アプリの設定画面から自動バックアップを有効にしてください)")
+        log(f"{args.user} が無いためスキップ (自動コミット経路の廃止に伴い現在は生成されない=アラート停止中)")
         return
     mystocks, settings = parse_user_data(user)
     if not mystocks:

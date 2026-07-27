@@ -30,7 +30,7 @@
 | 貸借対照表・キャッシュフロー（流動/固定資産・流動/固定負債・純資産・投資有価証券、営業/投資/財務CF、年次） | Yahoo Finance（上と同じ巡回で取得。銘柄分析タブのネットキャッシュ比率・BS構成・CF分析で使用） |
 | 決算短信の開示履歴アーカイブ（過去2年分・銘柄分析タブで使用） | TDnet（毎時の [backfill ワークフロー](.github/workflows/backfill.yml) が過去方向へ段階構築し `data/history/` のシャードに蓄積。2年分に到達すると自動停止） |
 | 決算短信PDFの恒久保存 | [`config/pdf_watchlist.json`](config/pdf_watchlist.json) の銘柄は、PDF本体を `frontend/pdfs/` に自動保存（TDnetの掲載期間後・5年後も閲覧可能。容量制限のため50銘柄までを推奨） |
-| 終値・前日比・52週高安・出来高・配当利回り | Yahoo Finance（時価総額と同じバッチで取得し `prices.json` に保存。マイ銘柄タブの終値表示・スクリーナー・アラート判定で使用） |
+| 終値・前日比・52週高安・出来高・配当利回り | Yahoo Finance（時価総額と同じバッチで取得し `prices.json` に保存。マイ銘柄タブの終値表示・スクリーナー・アラート判定（アラートは停止中）で使用） |
 | 終値アラート（現在停止中） | [`scripts/generate_alerts.py`](scripts/generate_alerts.py) は `config/user_data.json` を入力としてアラート（`alerts.json`）を生成する設計だが、個人状態の自動コミット経路の廃止に伴い入力が生成されないため、**現在アラートは作られない**。種別: 株価変動±X%・52週高安・出来高急増・決算前日/当日・重要開示・3日連続続落/続伸・決算への反応±X% |
 | イベント→株価反応の記録 | 平日引け後、[`scripts/track_reactions.py`](scripts/track_reactions.py) が決算短信・業績/配当予想修正・自己株式取得の開示と株価イベント（急変動±8%・52週高安・出来高急増）について「当日と翌営業日の反応%」を `reactions.json` に蓄積（銘柄分析タブに表示。15時以降の開示は翌営業日を当日として扱う） |
 | 市況概況の日次スナップショット | 平日引け後、[`scripts/market_summary.py`](scripts/market_summary.py) が市況統計を `data/market/日付.json`（アプリの過去日表示用）と **`日付.md`（生成AIに渡しやすいMarkdownレポート）** に保存し、`index.json` に主要指標（騰落レシオ・値上がり数・加重騰落率・新高値/新安値数・売買代金）の時系列を蓄積（約2年保持）。市況タブの推移チャートと日付切替で参照可能 |
